@@ -1,0 +1,8 @@
+logs/
+wandb/
+debug/
+debug.png
+__pycache__/
+val
+tests
+*png
