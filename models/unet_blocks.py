@@ -4,6 +4,7 @@ import math
 import numpy as np
 import torch.nn.functional as F
 from .unet_attention import SpatialTransformer
+from .common_blocks import ScaleShift, SinusoidalPosEmb
 
 class UNetDownBlock(nn.Module):
     def __init__(self, in_channels, output_channels, time_embed_dim, act, add_downsample=True, groups=32, eps=1e-5):
@@ -150,49 +151,6 @@ class ResnetBlock(nn.Module):
         if self.in_channels != self.out_channels:
             input_tensor = self.rechannel(input_tensor)
         return x + input_tensor
-
-class ScaleShift(nn.Module):
-    def __init__(self, in_dim, out_dim):
-        super().__init__()
-        self.in_dim = in_dim
-        self.out_dim = out_dim
-        # notice how GELU worked better then SILU here
-        self.act = nn.GELU()
-        self.scale_proj = nn.Linear(self.in_dim, self.out_dim)
-        self.shift_proj = nn.Linear(self.in_dim, self.out_dim)
-    def forward(self, x, x_condition):
-        # notice how the activation is applied first
-        x_condition = self.act(x_condition)
-        # notice how there is only 1 linear layer that applies the projection
-        scale = self.scale_proj(x_condition)
-        shift = self.shift_proj(x_condition)
-        # notice how you rescale x by scale+1, because NN typically output close to 0 
-        return x*(scale[:,:, None, None]+1) + shift[:, :, None, None]
-    
-        
-class SinusoidalPosEmb(nn.Module):
-    def __init__(self, dim, theta = 10000):
-        super().__init__()
-        self.dim = dim
-        self.theta = theta
-
-    def forward(self, t, dtype=torch.float32):
-        # from lucidrains
-        # device = t.device
-        # half_dim = self.dim // 2
-        # emb = math.log(self.theta) / (half_dim - 1)
-        # emb = torch.exp(torch.arange(half_dim, device=device) * -emb)
-        # emb = t[:, None] * emb[None, :]
-        # emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
-        
-        # notice how we interleave the sin and cos, some repos simply concatenate them
-        time_indices = torch.arange(0, self.dim, 2)
-        denominator = torch.exp(math.log(self.theta) * 2* time_indices / self.dim)
-        denominator = denominator.to(t.device)
-        emb = torch.zeros((t.shape[0], self.dim), device=t.device)
-        emb[:, 0::2] = torch.sin(t / denominator)
-        emb[:, 1::2] = torch.cos(t / denominator)
-        return emb
     
 class AttnBlock(nn.Module):
     '''Taken from Stable Diffusion'''

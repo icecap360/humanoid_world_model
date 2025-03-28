@@ -1,0 +1,192 @@
+vary seq len torch.float32
+
+Profiling with sequence length 256
+Config [B=16, L=256, D=512, H=8] - naive: 1.041 ms
+Config [B=16, L=256, D=512, H=8] - torch: 0.874 ms
+Config [B=16, L=256, D=512, H=8] - xformers: 0.928 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with sequence length 512
+Config [B=16, L=512, D=512, H=8] - naive: 2.618 ms
+Config [B=16, L=512, D=512, H=8] - torch: 2.186 ms
+Config [B=16, L=512, D=512, H=8] - xformers: 2.236 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with sequence length 768
+Config [B=16, L=768, D=512, H=8] - naive: 4.762 ms
+Config [B=16, L=768, D=512, H=8] - torch: 3.996 ms
+Config [B=16, L=768, D=512, H=8] - xformers: 3.972 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with sequence length 1024
+Config [B=16, L=1024, D=512, H=8] - naive: 7.477 ms
+Config [B=16, L=1024, D=512, H=8] - torch: 6.352 ms
+Config [B=16, L=1024, D=512, H=8] - xformers: 6.183 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with sequence length 2048
+Config [B=16, L=2048, D=512, H=8] - naive: 26.040 ms
+Config [B=16, L=2048, D=512, H=8] - torch: 21.426 ms
+Config [B=16, L=2048, D=512, H=8] - xformers: 19.921 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+{'naive': [1.0411334037780762, 2.617802619934082, 4.761803150177002, 7.477178573608398, 26.039505004882812], 'torch': [0.8743715286254883, 2.185945510864258, 3.9959073066711426, 6.352393627166748, 21.42616033554077], 'xformers': [0.9284782409667969, 2.235851287841797, 3.971836566925049, 6.183011531829834, 19.920659065246582], 'flash': [nan, nan, nan, nan, nan]}
+vary seq len torch.bfloat16
+
+Profiling with sequence length 256
+Config [B=16, L=256, D=512, H=8] - naive: 0.336 ms
+Config [B=16, L=256, D=512, H=8] - torch: 0.137 ms
+Config [B=16, L=256, D=512, H=8] - xformers: 0.239 ms
+Config [B=16, L=256, D=512, H=8] - flash: 0.140 ms
+
+Profiling with sequence length 512
+Config [B=16, L=512, D=512, H=8] - naive: 0.880 ms
+Config [B=16, L=512, D=512, H=8] - torch: 0.297 ms
+Config [B=16, L=512, D=512, H=8] - xformers: 0.397 ms
+Config [B=16, L=512, D=512, H=8] - flash: 0.331 ms
+
+Profiling with sequence length 768
+Config [B=16, L=768, D=512, H=8] - naive: 1.657 ms
+Config [B=16, L=768, D=512, H=8] - torch: 0.506 ms
+Config [B=16, L=768, D=512, H=8] - xformers: 0.645 ms
+Config [B=16, L=768, D=512, H=8] - flash: 0.553 ms
+
+Profiling with sequence length 1024
+Config [B=16, L=1024, D=512, H=8] - naive: 2.671 ms
+Config [B=16, L=1024, D=512, H=8] - torch: 0.809 ms
+Config [B=16, L=1024, D=512, H=8] - xformers: 0.961 ms
+Config [B=16, L=1024, D=512, H=8] - flash: 0.857 ms
+
+Profiling with sequence length 2048
+Config [B=16, L=2048, D=512, H=8] - naive: 11.076 ms
+Config [B=16, L=2048, D=512, H=8] - torch: 2.237 ms
+Config [B=16, L=2048, D=512, H=8] - xformers: 2.553 ms
+Config [B=16, L=2048, D=512, H=8] - flash: 2.435 ms
+{'naive': [0.336000919342041, 0.8801627159118652, 1.6573524475097656, 2.6712656021118164, 11.0762357711792], 'torch': [0.1368093490600586, 0.2969193458557129, 0.5060243606567383, 0.8085775375366211, 2.2368216514587402], 'xformers': [0.23868322372436523, 0.39669275283813477, 0.6452536582946777, 0.9612584114074707, 2.553422451019287], 'flash': [0.14047622680664062, 0.33081531524658203, 0.5532360076904297, 0.8570265769958496, 2.435121536254883]}
+vary hidden dim torch.float32
+
+Profiling with dimension 256 and 8 heads
+Config [B=16, L=512, D=256, H=8] - naive: 1.746 ms
+Config [B=16, L=512, D=256, H=8] - torch: 1.233 ms
+Config [B=16, L=512, D=256, H=8] - xformers: 1.167 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with dimension 512 and 8 heads
+Config [B=16, L=512, D=512, H=8] - naive: 2.653 ms
+Config [B=16, L=512, D=512, H=8] - torch: 2.224 ms
+Config [B=16, L=512, D=512, H=8] - xformers: 2.274 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with dimension 768 and 8 heads
+Config [B=16, L=512, D=768, H=8] - naive: 4.182 ms
+Config [B=16, L=512, D=768, H=8] - torch: 3.446 ms
+Config [B=16, L=512, D=768, H=8] - xformers: 3.692 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with dimension 1024 and 8 heads
+Config [B=16, L=512, D=1024, H=8] - naive: 6.224 ms
+Config [B=16, L=512, D=1024, H=8] - torch: 5.450 ms
+Config [B=16, L=512, D=1024, H=8] - xformers: 5.719 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with dimension 2048 and 8 heads
+Config [B=16, L=512, D=2048, H=8] - naive: 20.213 ms
+Config [B=16, L=512, D=2048, H=8] - torch: 20.033 ms
+Config [B=16, L=512, D=2048, H=8] - xformers: 20.706 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+{'naive': [1.745741367340088, 2.6534581184387207, 4.182496070861816, 6.223621368408203, 20.212562084197998], 'torch': [1.2334632873535156, 2.224137783050537, 3.4464526176452637, 5.449678897857666, 20.0327467918396], 'xformers': [1.166837215423584, 2.2737979888916016, 3.69185209274292, 5.719149112701416, 20.70573091506958], 'flash': [nan, nan, nan, nan, nan]}
+vary hidden dim torch.bfloat16
+
+Profiling with dimension 256 and 8 heads
+Config [B=16, L=512, D=256, H=8] - naive: 0.647 ms
+Config [B=16, L=512, D=256, H=8] - torch: 0.137 ms
+Config [B=16, L=512, D=256, H=8] - xformers: 0.240 ms
+Config [B=16, L=512, D=256, H=8] - flash: 0.141 ms
+
+Profiling with dimension 512 and 8 heads
+Config [B=16, L=512, D=512, H=8] - naive: 0.883 ms
+Config [B=16, L=512, D=512, H=8] - torch: 0.307 ms
+Config [B=16, L=512, D=512, H=8] - xformers: 0.399 ms
+Config [B=16, L=512, D=512, H=8] - flash: 0.336 ms
+
+Profiling with dimension 768 and 8 heads
+Config [B=16, L=512, D=768, H=8] - naive: 1.238 ms
+Config [B=16, L=512, D=768, H=8] - torch: 0.562 ms
+Config [B=16, L=512, D=768, H=8] - xformers: 0.677 ms
+Config [B=16, L=512, D=768, H=8] - flash: 0.565 ms
+
+Profiling with dimension 1024 and 8 heads
+Config [B=16, L=512, D=1024, H=8] - naive: 1.697 ms
+Config [B=16, L=512, D=1024, H=8] - torch: 0.951 ms
+Config [B=16, L=512, D=1024, H=8] - xformers: 1.092 ms
+Config [B=16, L=512, D=1024, H=8] - flash: 0.954 ms
+
+Profiling with dimension 2048 and 8 heads
+Config [B=16, L=512, D=2048, H=8] - naive: 4.236 ms
+Config [B=16, L=512, D=2048, H=8] - torch: 3.180 ms
+Config [B=16, L=512, D=2048, H=8] - xformers: 3.463 ms
+Config [B=16, L=512, D=2048, H=8] - flash: 3.177 ms
+{'naive': [0.646669864654541, 0.8828163146972656, 1.2380290031433105, 1.69691801071167, 4.23569917678833], 'torch': [0.13689041137695312, 0.3067445755004883, 0.5619287490844727, 0.9510064125061035, 3.1804633140563965], 'xformers': [0.24007320404052734, 0.39939165115356445, 0.6772279739379883, 1.0924267768859863, 3.4634017944335938], 'flash': [0.14078617095947266, 0.33603906631469727, 0.5654072761535645, 0.95428466796875, 3.176877498626709]}
+vary batch size torch.float32
+
+Profiling with batch size 16
+Config [B=16, L=512, D=512, H=8] - naive: 2.682 ms
+Config [B=16, L=512, D=512, H=8] - torch: 2.224 ms
+Config [B=16, L=512, D=512, H=8] - xformers: 2.317 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with batch size 16
+Config [B=16, L=512, D=512, H=8] - naive: 2.677 ms
+Config [B=16, L=512, D=512, H=8] - torch: 2.230 ms
+Config [B=16, L=512, D=512, H=8] - xformers: 2.279 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with batch size 24
+Config [B=24, L=512, D=512, H=8] - naive: 3.964 ms
+Config [B=24, L=512, D=512, H=8] - torch: 3.288 ms
+Config [B=24, L=512, D=512, H=8] - xformers: 3.364 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+
+Profiling with batch size 32
+Config [B=32, L=512, D=512, H=8] - naive: 5.239 ms
+Config [B=32, L=512, D=512, H=8] - torch: 4.403 ms
+Config [B=32, L=512, D=512, H=8] - xformers: 4.453 ms
+Error profiling flash attention: FlashAttention only support fp16 and bf16 data type
+{'naive': [2.681734561920166, 2.6766324043273926, 3.963711261749267, 5.239250659942627], 'torch': [2.223782539367676, 2.230253219604492, 3.2884812355041504, 4.402973651885986], 'xformers': [2.317063808441162, 2.278740406036377, 3.3635616302490234, 4.452545642852783], 'flash': [nan, nan, nan, nan]}
+vary batch size torch.bfloat16
+
+Profiling with batch size 16
+Config [B=16, L=512, D=512, H=8] - naive: 0.904 ms
+Config [B=16, L=512, D=512, H=8] - torch: 0.307 ms
+Config [B=16, L=512, D=512, H=8] - xformers: 0.404 ms
+Config [B=16, L=512, D=512, H=8] - flash: 0.338 ms
+
+Profiling with batch size 16
+Config [B=16, L=512, D=512, H=8] - naive: 0.907 ms
+Config [B=16, L=512, D=512, H=8] - torch: 0.307 ms
+Config [B=16, L=512, D=512, H=8] - xformers: 0.408 ms
+Config [B=16, L=512, D=512, H=8] - flash: 0.337 ms
+
+Profiling with batch size 24
+Config [B=24, L=512, D=512, H=8] - naive: 1.321 ms
+Config [B=24, L=512, D=512, H=8] - torch: 0.452 ms
+Config [B=24, L=512, D=512, H=8] - xformers: 0.597 ms
+Config [B=24, L=512, D=512, H=8] - flash: 0.492 ms
+
+Profiling with batch size 32
+Config [B=32, L=512, D=512, H=8] - naive: 1.794 ms
+Config [B=32, L=512, D=512, H=8] - torch: 0.637 ms
+Config [B=32, L=512, D=512, H=8] - xformers: 0.804 ms
+Config [B=32, L=512, D=512, H=8] - flash: 0.685 ms
+{'naive': [0.9041762351989746, 0.9067344665527344, 1.3209056854248047, 1.7942166328430176], 'torch': [0.3070235252380371, 0.3065776824951172, 0.4523634910583496, 0.6370449066162109], 'xformers': [0.403745174407959, 0.4079151153564453, 0.5969071388244629, 0.8042621612548828], 'flash': [0.3375434875488281, 0.33695459365844727, 0.49184322357177734, 0.6849384307861328]}
+memory torch.float32
+Config [B=16, L=1024, D=512, H=8] - naive: 1197.01 MB
+Config [B=16, L=1024, D=512, H=8] - torch: 238.01 MB
+Config [B=16, L=1024, D=512, H=8] - xformers: 334.01 MB
+Error profiling memory for flash attention: FlashAttention only support fp16 and bf16 data type
+{'naive': 1197.0078125, 'torch': 238.0078125, 'xformers': 334.0078125, 'flash': nan}
+memory torch.bfloat16
+Config [B=16, L=1024, D=512, H=8] - naive: 603.00 MB
+Config [B=16, L=1024, D=512, H=8] - torch: 124.00 MB
+Config [B=16, L=1024, D=512, H=8] - xformers: 172.00 MB
+Config [B=16, L=1024, D=512, H=8] - flash: 124.00 MB
+{'naive': 603.00390625, 'torch': 124.00390625, 'xformers': 172.00390625, 'flash': 124.00390625}

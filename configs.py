@@ -39,12 +39,12 @@ class BaseConfig:
     resume_model = "/pub0/qasim/1xgpt/humanoid_world_model/val/12-26-12-49/checkpoint-0-5"  
     exp_prefix = 'DDPM'
     unet_blocks = [256, 256*2, 256*3, 256*4] # [128,256,512, 1024]
-    attention_resolutions = [32, 16, 8, 4]
+    unet_attention_resolutions = [32, 16, 8, 4]
     
     data = {
         "type" : "coco",
-        "1xgpt_train_dir": "/pub0/qasim/1xgpt/data/data_v2_raw/train_v2.0_raw",
-        "1xgpt_val_dir": "/pub0/qasim/1xgpt/data/data_v2_raw/val_v2.0_raw",
+        "hmwm_train_dir": "/pub0/qasim/1xgpt/data/data_v2_raw/train_v2.0_raw",
+        "hmwm_val_dir": "/pub0/qasim/1xgpt/data/data_v2_raw/val_v2.0_raw",
         "coco_train_imgs": "/pub0/data/mscoco_2017/coco/images/train2017",
         "coco_train_ann": "/pub0/data/mscoco_2017/coco/annotations/captions_train2017.json",
         "coco_val_imgs": "/pub0/data/mscoco_2017/coco/images/val2017",

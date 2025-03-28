@@ -1,4 +1,5 @@
 from torchvision.datasets import CocoCaptions
+import os
 from transformers import T5Tokenizer, T5EncoderModel
 import random
 
@@ -26,8 +27,11 @@ class CustomCoco(CocoCaptions):
         #         i_captions.append(metadata[j][i])
         #     # captions.append(i_captions)
         #     captions.append(random.choice(i_captions))
-        captions = random.choice(target)
+        captions = target[0]
         target = self.text_tokenizer.tokenize(captions)
-
-        return image, target
+        return {'imgs': image, 
+                'captions': target}
+        # target['caption text'] = captions
+        # print(captions)
+        return image, target, captions
     

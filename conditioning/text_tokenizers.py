@@ -2,23 +2,9 @@ from transformers import T5Tokenizer, T5EncoderModel
 import torch
 import abc
 from transformers import CLIPTextModel, CLIPTokenizer
-
-class TextEmbedder(abc.ABC):
-    @abc.abstractmethod
-    def tokenize(self, captions):
-        pass
-    @abc.abstractmethod
-    def get_embeddding(self, captions):
-        pass
-    @property
-    def device(self):
-        return self._device  # Use the internal variable
-    @abc.abstractmethod
-    def to(self, device):
-        pass
+from .tokenizer import Embedder        
         
-        
-class T5TextEmbedder(TextEmbedder):
+class T5TextEmbedder(Embedder):
     def __init__(self, device='cpu'):
         self.t5_model = T5EncoderModel.from_pretrained("google-t5/t5-small").to(device)
         for param in self.t5_model.parameters():
@@ -50,7 +36,7 @@ class T5TextEmbedder(TextEmbedder):
 
         return pooled_embeddings  # Shape: (batch_size, hidden_dim)
 
-class CLIPTextEmbedder(TextEmbedder):
+class CLIPTextEmbedder(Embedder):
     def __init__(self, device='cpu'):
         # Load the CLIP text model and tokenizer
         self.clip_model = CLIPTextModel.from_pretrained("openai/clip-vit-base-patch32").to(device)

@@ -8,21 +8,63 @@
             "name": "unit test",
             "type": "debugpy",
             "request": "launch",
-            "program": "models/unet.py",
+            "program": "data/video_dataset.py",
             "console": "integratedTerminal",
             "args": ["--debug"],
             "justMyCode": false
         },
         {
-            "name": "train",
+            "name": "temp",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "temp.py",
+            "console": "integratedTerminal",
+            "args": ["--debug"],
+            "justMyCode": false
+        },
+        {
+            "name": "unit test model",
+            "type": "debugpy",
+            "request": "launch",
+            "module": "models.dit_video",  // Run as a module instead of a script
+            "console": "integratedTerminal",
+            "args": ["--debug"],
+            "justMyCode": false
+        },
+        {
+            "name": "train (one sample)",
             "type": "debugpy",
             "request": "launch",
             "program": "train.py",
             "console": "integratedTerminal",
-            "args": ["--debug"],
+            "args": ["one_sample=True"],
             "justMyCode": false,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "1"
+                "CUDA_VISIBLE_DEVICES": "2"
+            }
+        },
+        {
+            "name": "train (one sample + debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "train.py",
+            "console": "integratedTerminal",
+            "args": ["one_sample=True", "debug=True"],
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2"
+            }
+        },
+        {
+            "name": "train (debug)",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "train.py",
+            "console": "integratedTerminal",
+            "args": ["debug=True"],
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2"
             }
         },
         {
@@ -32,16 +74,17 @@
             "module": "torch.distributed.run",
             "console": "integratedTerminal",
             "args": [
-                "--nproc_per_node=2",
+                "--nproc_per_node=1",
                 "--rdzv_backend", "c10d",
                 "--rdzv_endpoint", "localhost:29500",
                 "--nnodes=1",
                 "train.py",
-                "--debug"
+                "debug=True",
+                // "one_sample=True"
             ],
             "justMyCode": false,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "0,1",
+                "CUDA_VISIBLE_DEVICES": "2",
                 "TORCH_NCCL_DEBUG": "INFO",
                 "TORCH_DISTRIBUTED_DEBUG": "DETAIL",
                 "NCCL_P2P_DISABLE": "0",

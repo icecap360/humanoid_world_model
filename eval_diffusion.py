@@ -52,7 +52,7 @@ def get_dataloader_kwargs():
         'persistent_workers': True,  # Keep workers alive between epochs
     }
 
-val_dataset = data.RawImageDataset(config.wm1xgpt_val_dir)
+val_dataset = data.RawImageDataset(config.wmhmwm_val_dir)
 val_dataloader = DataLoader(val_dataset, batch_size=config.eval_batch_size, shuffle=True, **get_dataloader_kwargs()) #  pin_memory=True, num_workers=0, prefetch_factor=None
 
 noise_scheduler = DDPMScheduler(num_train_timesteps=config.noise_steps)
@@ -130,7 +130,7 @@ accelerator.load_state(config.resume_model)
 # model.eval()
 # model.to(device)
 pipeline = DDPMPipeline(unet=model, scheduler=noise_scheduler)
-path = Path(config.results_dir)
+path = Path(config.eval_dir)
 sample_imgs( path, pipeline)
 
 

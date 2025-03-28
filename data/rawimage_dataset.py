@@ -78,8 +78,9 @@ class RawImageDataset(TorchDataset):
         frame = np.moveaxis(frame, 2, 0)
         frame = frame/_UINT8_MAX_F * 2.0 - 1.0
 
-        return frame
-
+        return {
+            "imgs": frame
+        }
     def get_frame_info(self, idx):
         """Helper method to debug frame locations"""
         shard_idx = np.searchsorted(self.cumulative_sizes[1:], idx, side='right')

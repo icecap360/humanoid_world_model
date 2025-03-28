@@ -38,7 +38,10 @@ class Sampler:
         for t in self.progress_bar(timesteps):
             # 1. predict noise model_output
             # model_output = unet(latents, t).sample
-            model_output = unet(latents, t)
+            batch = {
+                'noisy_latents': latents,
+            }
+            model_output = unet(batch, t)
 
             # 2. compute previous image: x_t -> x_t-1
             latents = self.scheduler.step(model_output, t, latents, generator=generator).prev_sample
@@ -48,7 +51,7 @@ class Sampler:
         pred_img = decode_img(pred_img)
         pred_img = [PIL.Image.fromarray(s) for s in pred_img]
         return pred_img
-    def sample_text(self, model, img_size, in_channels, text_tokenizer, prompt_file, dtype=torch.float32, device='cuda'):
+    def sample_text(self, model, img_size, in_channels, text_tokenizer, prompt_file, guidance_scale, dtype=torch.float32, device='cuda'):
         batch_size = 16
         if isinstance(img_size, int):
             sample_height = img_size
@@ -80,10 +83,17 @@ class Sampler:
         for t in self.progress_bar(timesteps):
             # 1. predict noise model_output
             # model_output = unet(latents, t).sample
-            model_output = model(latents, t, context=prompts)
-
+            t = t.reshape(1,1,1,1)
+            batch = {
+                'noisy_latents': latents,
+                'captions': prompts
+            }
+            pred_cond = model(batch, t, device, use_cfg=False)
+            batch.pop('captions')
+            pred_uncond = model(batch, t, device, use_cfg=False)
+            pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
             # 2. compute previous image: x_t -> x_t-1
-            latents = self.scheduler.step(model_output, t, latents, generator=generator).prev_sample
+            latents = self.scheduler.step(pred, t, latents, generator=generator).prev_sample
         
         vae = self.vae.module if hasattr(self.vae, "module") else self.vae
         pred_img = vae.decode(latents.to(torch.bfloat16))
