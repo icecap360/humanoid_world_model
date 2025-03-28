@@ -109,22 +109,49 @@ class RawVideoDataset(TorchDataset):
         frame_idx = idx - self.cumulative_sizes[shard_idx]
         return shard_idx, frame_idx 
     
-    def extract_frames_opencv(self, video_path, start_frame, end_frame):
-        cap = cv2.VideoCapture(video_path)
-        cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)  # Jump to start frame
-        
-        frames = [] # [np.zeros((self.image_size, self.image_size, 3)) for _ in range(end_frame-start_frame)]
-        for frame_idx in range(start_frame, end_frame):
-            ret, frame = cap.read()
-            if not ret:
-                break
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
-            frame = cv2.resize(frame, (self.image_size, self.image_size))
-            frames.append(frame)
-            # frames[frame_idx - start_frame] = frame
-        
-        cap.release()
-        return np.array(frames)  # Shape: (num_frames, H, W, 3)
+    def extract_frames_opencv(self, start_shard, end_shard, start_frame, end_frame):
+        if start_shard == end_shard:
+            # if the shards are same then we can get all frames from the same video
+            video_path = self.video_paths[start_shard]
+            start_cap = cv2.VideoCapture(video_path)
+            start_cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)  # Jump to start frame
+            
+            frames = []
+            for frame_idx in range(start_frame, end_frame):
+                ret, frame = start_cap.read()
+                if not ret:
+                    break
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+                frame = cv2.resize(frame, (self.image_size, self.image_size))
+                frames.append(frame)            
+            start_cap.release()
+            return np.array(frames)  # Shape: (num_frames, H, W, 3)
+        else:
+            # if the shards are different then we need to get the video frames from different videos
+            frames = []
+            start_cap = cv2.VideoCapture(self.video_paths[start_shard])
+            start_cap.set(cv2.CAP_PROP_POS_FRAMES, start_frame)
+            for frame_idx in range(start_frame, self.shard_sizes[start_shard]):
+                ret, frame = start_cap.read()
+                if not ret:
+                    break
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+                frame = cv2.resize(frame, (self.image_size, self.image_size))
+                frames.append(frame)
+            start_cap.release()
+
+            end_cap = cv2.VideoCapture(self.video_paths[end_shard])
+            end_cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+            for frame_idx in range(0, end_frame):
+                ret, frame = end_cap.read()
+                if not ret:
+                    break
+                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+                frame = cv2.resize(frame, (self.image_size, self.image_size))
+                frames.append(frame)
+            
+            end_cap.release()
+            return np.array(frames)  
 
     def __len__(self):
         return len(self.valid_start_inds)
@@ -142,7 +169,8 @@ class RawVideoDataset(TorchDataset):
         shard_idx = start_shard_idx
         
         frames = self.extract_frames_opencv(
-            self.video_paths[shard_idx],
+            start_shard_idx,
+            end_shard_idx,
             start_frame_idx, 
             end_frame_idx
         )
