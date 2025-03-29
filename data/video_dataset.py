@@ -121,7 +121,7 @@ class RawVideoDataset(TorchDataset):
                 ret, frame = start_cap.read()
                 if not ret:
                     break
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+                # frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
                 frame = cv2.resize(frame, (self.image_size, self.image_size))
                 frames.append(frame)            
             start_cap.release()
@@ -135,7 +135,7 @@ class RawVideoDataset(TorchDataset):
                 ret, frame = start_cap.read()
                 if not ret:
                     break
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+                # frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
                 frame = cv2.resize(frame, (self.image_size, self.image_size))
                 frames.append(frame)
             start_cap.release()
@@ -146,7 +146,7 @@ class RawVideoDataset(TorchDataset):
                 ret, frame = end_cap.read()
                 if not ret:
                     break
-                frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
+                # frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Convert from BGR to RGB
                 frame = cv2.resize(frame, (self.image_size, self.image_size))
                 frames.append(frame)
             

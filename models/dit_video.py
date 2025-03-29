@@ -3,7 +3,7 @@ import torch
 from .common_blocks import SinusoidalPosEmb, VideoPositionEmb, ActionPositionEmb
 import torch.functional as F
 from einops import pack, unpack
-from .dit_video_blocks import PatchVideo, MMDiTBlock, FinalLayer
+from .dit_video_blocks import PatchVideo, MMDiTBlock, MMDiTBlockModalitySharing, FinalLayer
 from .model import Model
 
 class VideoDiTModel(Model):
@@ -21,6 +21,7 @@ class VideoDiTModel(Model):
                 n_layers,
                 n_head,
                 cfg_prob,
+                discrete_time = True,
                 patch_t=1,
                 device='cuda',
         ):
@@ -38,7 +39,7 @@ class VideoDiTModel(Model):
         self.dim_hidden = dim_hidden
         self.dim_head = self.dim_hidden // self.n_head
         self.time_embedder = nn.Sequential(
-            SinusoidalPosEmb(self.dim_hidden, theta=300 ),
+            SinusoidalPosEmb(self.dim_hidden, theta=10000),
             nn.Linear(self.dim_hidden , self.dim_hidden * 4),
             nn.SiLU(),
             nn.Linear(self.dim_hidden * 4, self.dim_hidden)
@@ -79,13 +80,13 @@ class VideoDiTModel(Model):
         for i in range(self.n_layers):
             block = None
             if i == self.n_layers - 1:
-                block = MMDiTBlock(
+                block = MMDiTBlockModalitySharing(
                     self.dim_hidden,
                     self.dim_hidden,
                     skip_context_ff = True
                 )
             else:
-                block = MMDiTBlock(
+                block = MMDiTBlockModalitySharing(
                     self.dim_hidden,
                     self.dim_hidden,
                 )
@@ -106,36 +107,33 @@ class VideoDiTModel(Model):
         # self.conditioning = conditioning
         self.initialize_weights()
 
-    def context_drop(self, batch, use_cfg, device, force_drop_ids=False):
+    def context_drop(self, batch, use_cfg, device, force_drop_context=False):
         """ USING TORCH.CONTEXT
         Drops labels to enable classifier-free guidance.
         """
         b, c, tp, h, w = batch['noisy_latents'].shape
-        if force_drop_ids == False and use_cfg:
+        if force_drop_context == False and use_cfg:
             drop_ids = torch.rand(b, device=device) < self.cfg_prob
             batch['past_latents'][drop_ids, :] = self.empty_past_frames_emb.to(device)
             batch['past_actions'][drop_ids, :] = self.empty_past_actions_emb.to(device)
             batch['future_actions'][drop_ids, :] = self.empty_future_actions_emb.to(device)
-        elif force_drop_ids == False and use_cfg == False:
+        elif force_drop_context == False and use_cfg == False:
             pass
-        elif force_drop_ids == True:            
+        elif force_drop_context == True:            
             # batch['past_latents'] = self.empty_past_frames_emb.repeat(b,1,1,h,w).to(device)
             # batch['past_actions'] = self.empty_past_actions_emb.repeat(b,tp,1).to(device)
             # b, _, tf, _, _ = batch['noisy_latents'].shape
             # batch['future_actions'] = self.empty_future_actions_emb.repeat(b,tf,1).to(device)
-
             batch['past_latents'] = self.empty_past_frames_emb.repeat(b,1,1,1,1).to(device)
             batch['past_actions'] = self.empty_past_actions_emb.repeat(b,1,1).to(device)
             b, _, tf, _, _ = batch['noisy_latents'].shape
             batch['future_actions'] = self.empty_future_actions_emb.repeat(b,1,1).to(device)
         return batch
     
-    def forward(self, batch, time, device='cuda:1', use_cfg=False):
+    def forward(self, batch, time, device='cuda:1', force_drop_context=False, use_cfg=False):
         device = batch['noisy_latents'].device
 
-        force_drop_ids = batch.get('past_latents') is None
-        batch = self.context_drop(batch, use_cfg, device, force_drop_ids=force_drop_ids)
-        
+        batch = self.context_drop(batch, use_cfg, device, force_drop_context=force_drop_context)
         fv = batch['noisy_latents']
         pv = batch['past_latents']
         pa = batch['past_actions']

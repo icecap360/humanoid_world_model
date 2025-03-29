@@ -37,6 +37,7 @@ from data import get_dataloaders, encode_batch
 from models import get_model
 from diffusers.training_utils import EMAModel
 from accelerate.utils import DistributedDataParallelKwargs
+import cv2
 
 def setup_distributed_training(config):
     """Setup for distributed training"""
@@ -53,10 +54,11 @@ def setup_distributed_training(config):
     set_seed(config.seed)
     return accelerator
 
-def compute_val_loss(model, val_dataloader, vae_model, noise_scheduler, accelerator, n_timesteps, cfg,  progress_bar_enabled=True):
+def compute_val_loss(cfg, model, val_dataloader, vae_model, noise_scheduler, accelerator, progress_bar_enabled=True):
     model.eval()
     total_loss = 0.0
     total_samples = 0
+    n_timesteps = cfg.model.noise_steps
 
     # Create progress bar only on the main process and if enabled
     if accelerator.is_main_process and progress_bar_enabled:
@@ -65,38 +67,19 @@ def compute_val_loss(model, val_dataloader, vae_model, noise_scheduler, accelera
         pbar = None
 
     for step, batch in enumerate(val_dataloader):
-        # Process batch based on its type
-        # if isinstance(batch, (list, tuple)):
-        #     if len(batch) == 2:
-        #         imgs, captions = batch[0], batch[1]
-        #     else:
-        #         imgs = batch
-        #         captions = None
-        # elif isinstance(batch, dict):
-        #     batch = {k: v.to(accelerator.device) for k, v in batch.items()}
-        #     imgs = batch["image"]
-        #     captions = batch.get("caption", None)
-        # else:
-        #     imgs = batch
-        #     captions = None
-
         latents, batch = encode_batch(cfg, batch, vae_model, accelerator)
-        # imgs = batch["imgs"]
-        # # Move images to the accelerator device and convert to bfloat16
-        # imgs = imgs.to(accelerator.device).to(torch.bfloat16)
-        # # Encode images to latents
-        # latents = vae_model.encode(imgs)[0]
-
         bs = latents.shape[0]
-        # Generate noise and timesteps
         noise = torch.randn(latents.shape, device=accelerator.device)
-        timesteps = torch.randint(
-            0,
-            n_timesteps,
-            (bs,1),
-            device=accelerator.device,
-            dtype=torch.int64
-        )
+        if cfg.use_discrete_time:
+            timesteps = torch.randint(
+                0, n_timesteps,
+                (bs,1),
+                device=accelerator.device, dtype=torch.int64
+            )
+        else:
+            u = torch.randn((bs,1), device=accelerator.device)
+            timesteps = 1.0 / (1.0 + torch.exp(-u))
+            timesteps = timesteps * n_timesteps
         # Add noise to latents
         batch['noisy_latents'] = noise_scheduler.add_noise(latents, noise, timesteps)
 
@@ -112,7 +95,6 @@ def compute_val_loss(model, val_dataloader, vae_model, noise_scheduler, accelera
         if pbar is not None:
             pbar.update(1)
             pbar.set_postfix(loss=loss.item())
-        break
     # if pbar is not None:
     #     pbar.close()
 
@@ -148,12 +130,14 @@ def main(cfg):
         cfg.train.lr_warmup_steps = 0
         cfg.train.gradient_accumulation_steps = 1
         cfg.train.batch_size = 4
-        cfg.val.run = True
+        cfg.val.batch_size = 1
         cfg.exp_prefix = 'one-sample'
         cfg.train.save_model_iters = 6000
         cfg.train.val_iters = 5
         cfg.conditioning.prompt_file = 'prompts_one_sample.txt'
-        cfg.val.skip_val_loss = False
+        cfg.val.run = True
+        cfg.val.skip_val_loss = True
+        cfg.val.skip_img_sample = False
 
     tokenizer_config = TokenizerConfigs[cfg.image_tokenizer.tokenizer_type].value
     tokenizer_config.update(dict(spatial_compression=cfg.image_tokenizer.spatial_compression))
@@ -202,7 +186,6 @@ def main(cfg):
         num_past_frames=cfg.conditioning.get('num_past_frames'),
         num_future_frames=cfg.conditioning.get('num_future_frames'),
     )
-    # first_batch = next(iter(train_dataloader))
 
     noise_scheduler = get_scheduler(cfg.model.scheduler_type, cfg.model.noise_steps)
 
@@ -244,15 +227,16 @@ def main(cfg):
     conditioning_manager.to(accelerator.device)
     
     # Compile the model
-    if torch.cuda.is_available() and not cfg.debug:
-        model = torch.compile(model) #defaults to mode="reduce-overhead"
+    # if torch.cuda.is_available() and not cfg.debug:
+        # model = torch.compile(model) #defaults to mode="reduce-overhead"
 
-    ema_model = EMAModel(
-        model,
-        inv_gamma=cfg.model.ema_inv_gamma,
-        power=cfg.model.ema_power,
-        max_value=cfg.model.ema_max_decay
-    )
+    if not cfg.debug:
+        ema_model = EMAModel(
+            model,
+            inv_gamma=cfg.model.ema_inv_gamma,
+            power=cfg.model.ema_power,
+            max_value=cfg.model.ema_max_decay
+        )
 
     start_epoch, start_iter = 0, 0
     if cfg.train.resume_train:
@@ -263,7 +247,6 @@ def main(cfg):
     now = datetime.datetime.now()
     formatted_datetime = now.strftime("%B-%d-%H-%M")
     eval_dir = Path(cfg.log_dir) / (cfg.model.scheduler_type + ' ' + formatted_datetime)
-    shutil.rmtree(cfg.log_dir, ignore_errors=True)
 
     vae_model = vae.module if hasattr(vae, "module") else vae
     if cfg.one_sample:
@@ -286,13 +269,12 @@ def main(cfg):
             latents, batch = encode_batch(cfg, batch, vae_model, accelerator)
             noise = torch.randn(latents.shape, device=latents.device)
             bs = latents.shape[0]
-            timesteps = torch.randint(
-                    0, 
-                    cfg.model.noise_steps, 
-                    (bs,1), 
-                    device=latents.device,
-                    dtype=torch.int64
-                )
+            if cfg.use_discrete_time:
+                timesteps = torch.randint(0,  cfg.model.noise_steps, (bs,1), device=latents.device,dtype=torch.int64)
+            else:
+                u = torch.randn((bs,1), device=accelerator.device)
+                timesteps = 1.0 / (1.0 + torch.exp(-u))
+                timesteps = timesteps * cfg.model.noise_steps
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
             batch['noisy_latents'] = noisy_latents
@@ -311,7 +293,7 @@ def main(cfg):
                 
                 optimizer.step()
                 lr_scheduler.step()
-                if accelerator.sync_gradients:
+                if accelerator.sync_gradients and not cfg.debug:
                     ema_model.step(model)
                 optimizer.zero_grad()
                 
@@ -329,7 +311,7 @@ def main(cfg):
                     wandb.log(logs)
                 if step % cfg.train.save_model_iters == 0 and step > 0 and not cfg.debug:
                     os.makedirs(eval_dir, exist_ok=True)    
-                    path = eval_dir / ('checkpoint-' +str(epoch))
+                    path = eval_dir / ('checkpoint-' +str(epoch) + str(step))
                     accelerator.save_state(path, safe_serialization=True)
                     ema_model.store(model.parameters())
                     ema_model.copy_to(model.parameters())
@@ -345,7 +327,7 @@ def main(cfg):
 
                 # Log validation loss
                 if not cfg.val.skip_val_loss:
-                    val_loss = compute_val_loss(model_unwrapped, val_dataloader, vae_model, noise_scheduler,  accelerator, cfg.model.noise_steps, cfg)
+                    val_loss = compute_val_loss(cfg, model_unwrapped, val_dataloader, vae_model, noise_scheduler,  accelerator)
                     if accelerator.is_main_process:
                         if not cfg.debug:
                             wandb.log({
@@ -358,8 +340,20 @@ def main(cfg):
                 # Sample some images
                 if accelerator.is_main_process and not cfg.val.skip_img_sample:
                     with torch.no_grad():
-                        if cfg.conditioning.type == 'text':
-                            samples = sampler.sample_text(
+                        if cfg.gen_type == 'video':
+                            sample_videos, sample_grids = sampler.sample_video(
+                                cfg,
+                                train_dataloader,
+                                batch_idx=75,
+                                vae=vae_model, 
+                                accelerator=accelerator,
+                                model=model_unwrapped,
+                                guidance_scale=cfg.model.cfg_scale,
+                                dtype=noisy_latents.dtype,
+                                device=accelerator.device
+                            )
+                        elif cfg.conditioning.type == 'text':
+                            samples = sampler.sample_textcond_img(
                                 model=model_unwrapped, 
                                 img_size=cfg.image_size, 
                                 in_channels=latent_channels,
@@ -369,21 +363,52 @@ def main(cfg):
                                 dtype=noisy_latents.dtype,
                                 guidance_scale=cfg.model.cfg_scale)
                         else:
-                            samples = sampler.sample(
+                            samples = sampler.sample_uncond_img(
                                 unet=model_unwrapped, 
                                 img_size=cfg.image_size, 
                                 in_channels=latent_channels,
                                 device=accelerator.device, 
                                 dtype=noisy_latents.dtype)
-                    
-                    image_grid = make_image_grid(samples, rows=4, cols=4)
-                    os.makedirs(eval_dir, exist_ok=True)
-                    image_grid.save(path)
-                    logging.info(f"Sampled images to : {path}")
-                    if accelerator.is_main_process and not cfg.debug:
-                        wandb.log({
-                            "generated_images": wandb.Image(str(path), caption=f"Epoch {epoch}, iter {step}")
-                        })
+
+                        if cfg.gen_type == 'image':
+                            image_grid = make_image_grid(samples, rows=4, cols=4)
+                            os.makedirs(eval_dir, exist_ok=True)
+                            image_grid.save(path)
+                            logging.info(f"Sampled images to : {path}")
+                            if accelerator.is_main_process and not cfg.debug:
+                                wandb.log({
+                                    "generated_images": wandb.Image(str(path), caption=f"Epoch {epoch}, iter {step}")
+                                })
+                        else:
+                            os.makedirs(eval_dir, exist_ok=True)
+                            b = len(sample_videos)
+                            h, w = sample_videos[0][0].size
+                            for i in range(b):
+                                path_vid = os.path.join(eval_dir, f'output-{i}.mp4')
+                                out = cv2.VideoWriter(path_vid, cv2.VideoWriter_fourcc(*'mp4v'), 0.2, (w, h))
+                                for frame in sample_videos[i]:
+                                    out.write(np.asarray(frame))
+                                out.release()
+                                path_img0 = os.path.join(eval_dir, f'tokenizedprompt+predictions.jpeg')
+                                sample_grids[0][i].save(path_img0)
+                                
+                                path_img1 = os.path.join(eval_dir, f'gtprompt+predictions.jpeg')
+                                sample_grids[1][i].save(path_img1)
+                                
+                                path_img2 = os.path.join(eval_dir, f'gt_vs_predictions.jpeg')
+                                sample_grids[2][i].save(path_img2)
+
+                                if accelerator.is_main_process and not cfg.debug:
+                                    wandb.log({
+                                        f"samples/gt_vs_predictions-{i}": wandb.Image(str(path_img2), caption=f"Epoch {epoch}, iter {step}")
+                                    })
+                                    wandb.log({
+                                        f"samples/tokenizedprompt+predictions-{i}": wandb.Image(str(path_img0), caption=f"Epoch {epoch}, iter {step}")
+                                    })
+                                    wandb.log({
+                                        f"samples/gtprompt+predictions-{i}": wandb.Image(str(path_img1), caption=f"Epoch {epoch}, iter {step}")
+                                    })
+                                    # wandb.log({"samples/video": wandb.Video(path_vid, fps=0.2, format="mp4")})
             global_step += 1
 
         start_iter = 0

@@ -68,15 +68,17 @@
             }
         },
         {
-            "name": "train (distributed)",
+            "name": "train (distributed + debug)",
             "type": "python",
             "request": "launch",
             "module": "torch.distributed.run",
             "console": "integratedTerminal",
             "args": [
                 "--nproc_per_node=1",
-                "--rdzv_backend", "c10d",
-                "--rdzv_endpoint", "localhost:29500",
+                "--rdzv_backend", 
+                "c10d",
+                "--rdzv_endpoint", 
+                "localhost:29500",
                 "--nnodes=1",
                 "train.py",
                 "debug=True",

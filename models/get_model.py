@@ -62,10 +62,11 @@ def get_model(cfg, latent_channels, conditioning_manager, input_size):
             dim_spatial,
             cfg.conditioning.dim_act,
             cfg.model.token_dim,
-            2,
+            cfg.model.patch_size,
             cfg.model.num_layers,
             cfg.model.num_heads,
-            cfg.model.cfg_prob
+            cfg.model.cfg_prob,
+            discrete_time=cfg.use_discrete_time
         )
     else:
         raise Exception('Unknown model type')

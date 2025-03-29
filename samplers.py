@@ -1,9 +1,12 @@
+import PIL.Image
 import torch
 from einops import rearrange
 from configs import _UINT8_MAX_F
 import numpy as np
 import tqdm 
 import PIL 
+from diffusers.utils import make_image_grid
+from data import get_dataloaders, encode_batch
 
 class Sampler:
     def __init__(self, vae, scheduler, seed, spatial_compression, latent_channels, num_inference_steps):
@@ -14,7 +17,7 @@ class Sampler:
         self.latent_channels = latent_channels
         self.num_inference_steps = num_inference_steps
         
-    def sample(self, unet, img_size, in_channels, dtype=torch.float32, device='cuda'):
+    def sample_uncond_img(self, unet, img_size, in_channels, dtype=torch.float32, device='cuda'):
         batch_size = 16
         if isinstance(img_size, int):
             sample_height = img_size
@@ -48,16 +51,16 @@ class Sampler:
         
         vae = self.vae.module if hasattr(self.vae, "module") else self.vae
         pred_img = vae.decode(latents.to(torch.bfloat16))
-        pred_img = decode_img(pred_img)
+        pred_img = denormalize_img(pred_img)
         pred_img = [PIL.Image.fromarray(s) for s in pred_img]
         return pred_img
-    def sample_text(self, model, img_size, in_channels, text_tokenizer, prompt_file, guidance_scale, dtype=torch.float32, device='cuda'):
-        batch_size = 16
+    def sample_textcond_img(self, model, img_size, in_channels, text_tokenizer, prompt_file, guidance_scale, dtype=torch.float32, device='cuda'):
+        n_samples = 16
         if isinstance(img_size, int):
             sample_height = img_size
             sample_width = img_size
             image_shape = (
-                batch_size,
+                n_samples,
                 in_channels,
                 img_size,
                 img_size,
@@ -65,18 +68,18 @@ class Sampler:
         else:
             sample_height = img_size[0]
             sample_width = img_size[1]
-            image_shape = (batch_size, in_channels, *img_size)
+            image_shape = (n_samples, in_channels, *img_size)
         
         with open(prompt_file) as f:
             user_prompts = f.readlines()
             prompts = []
             # extend the prompt cyclically if batch_size > len(user_prompts)
-            for i in range(batch_size):
+            for i in range(n_samples):
                 prompts.append(user_prompts[i % len(user_prompts)])
             prompts = text_tokenizer.tokenize(prompts)        
         
         generator=torch.Generator(device=device).manual_seed(self.seed)
-        latents = torch.randn((batch_size, self.latent_channels, sample_height//self.spatial_compression, sample_width//self.spatial_compression), dtype=dtype, device=device, generator=generator)
+        latents = torch.randn((n_samples, self.latent_channels, sample_height//self.spatial_compression, sample_width//self.spatial_compression), dtype=dtype, device=device, generator=generator)
         
         self.scheduler.set_timesteps(self.num_inference_steps)
         timesteps = self.scheduler.timesteps.to(device)
@@ -97,9 +100,55 @@ class Sampler:
         
         vae = self.vae.module if hasattr(self.vae, "module") else self.vae
         pred_img = vae.decode(latents.to(torch.bfloat16))
-        pred_img = decode_img(pred_img)
+        pred_img = denormalize_img(pred_img)
         pred_img = [PIL.Image.fromarray(s) for s in pred_img]
         return pred_img
+    
+    def sample_video(self, cfg, train_dataloader, model, batch_idx, vae, accelerator, guidance_scale, dtype=torch.float32, device='cuda'):
+        n_samples = 4        
+        
+        train_dataloader_iter = iter(train_dataloader)
+        batch = next(train_dataloader_iter)
+        for i in range(batch_idx):
+            batch = next(train_dataloader_iter)
+        latents, batch = encode_batch(cfg, batch, vae, accelerator)
+        for key in batch.keys():
+            batch[key] = batch[key][:n_samples]
+        generator=torch.Generator(device=device).manual_seed(self.seed)
+        latents = torch.randn(batch['future_latents'].shape, dtype=dtype, device=device, generator=generator)
+        batch['noisy_latents'] = latents
+
+        self.scheduler.set_timesteps(self.num_inference_steps)
+        timesteps = self.scheduler.timesteps.to(device)
+        for t in self.progress_bar(timesteps):
+            # 1. predict noise model_output
+            # model_output = unet(latents, t).sample
+            t = t.repeat((batch['noisy_latents'].shape[0],1))
+            pred_cond = model(batch, t, device, use_cfg=False)
+            pred_uncond = model(batch, t, device, use_cfg=False, force_drop_context=True)
+            pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+            # 2. compute previous image: x_t -> x_t-1
+            latents = self.scheduler.step(pred, t, latents, generator=generator).prev_sample
+        
+        vae = self.vae.module if hasattr(self.vae, "module") else self.vae
+
+        all_pred_latents = torch.concatenate((batch['past_latents'], latents), 2) 
+        all_pred_frames = vae.decode(all_pred_latents.to(torch.bfloat16))
+
+        all_pred_video = split_video_to_imgs(denormalize_video(all_pred_frames))
+        pred_output_frames  = split_video_to_imgs(denormalize_video(all_pred_frames[:, :, cfg.conditioning.num_past_frames:]))
+        gt_input_frames = split_video_to_imgs(denormalize_video(batch['past_frames']))
+        gt_output_frames = split_video_to_imgs(denormalize_video(batch['future_frames']))
+        
+        img_grid_fullvideo = []
+        img_grid_fullvideo_tokenizedprompt = []
+        img_grid_generated = []
+        for i in range(all_pred_frames.shape[0]):
+            img_grid_fullvideo.append( make_image_grid(all_pred_video[i], rows=1, cols=len(all_pred_video[i])) )
+            img_grid_fullvideo_tokenizedprompt.append( make_image_grid(gt_input_frames[i] + pred_output_frames[i], rows=1, cols=len(all_pred_video[i])) )
+            img_grid_generated.append( make_image_grid(pred_output_frames[i] + gt_output_frames[i], 2, cfg.conditioning.num_future_frames) )
+        return all_pred_video, (img_grid_fullvideo, img_grid_fullvideo_tokenizedprompt, img_grid_generated)
+
     def progress_bar(self, iterable=None, total=None):
         if not hasattr(self, "_progress_bar_config"):
             self._progress_bar_config = {}
@@ -115,13 +164,30 @@ class Sampler:
         else:
             raise ValueError("Either `total` or `iterable` has to be defined.")
 
-def decode_img(preds):
+def denormalize_img(preds):
     output_imgs = (preds.float() + 1.0) / 2.0
     output_imgs = rearrange(output_imgs, 'b c h w -> b h w c')
     output_imgs = output_imgs.clamp(0, 1).cpu().numpy()
     output_imgs = output_imgs * _UINT8_MAX_F + 0.5
     output_imgs = output_imgs.astype(np.uint8)
     return output_imgs
+
+def denormalize_video(preds):
+    output_video = (preds.float() + 1.0) / 2.0
+    output_video = rearrange(output_video, 'b c t h w -> b t c h w')
+    output_video = output_video.clamp(0, 1).cpu().numpy()
+    output_video = output_video * _UINT8_MAX_F
+    output_video = output_video.astype(np.uint8)
+    return output_video
+
+def split_video_to_imgs(video):
+    b, t, c, h, w = video.shape
+    output_images = [[] for _ in range(b)]
+    for i in range(b):
+        for j in range(t):
+            img = np.moveaxis(video[i][j], 0, 2)
+            output_images[i].append(PIL.Image.fromarray(img))
+    return output_images
 
 def sample_hf_pipeline(pipeline, seed):
     # Sample some images from random noise (this is the backward diffusion process).

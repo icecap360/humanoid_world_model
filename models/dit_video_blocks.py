@@ -1,7 +1,6 @@
 import torch.nn as nn
 import torch 
 from .common_blocks import SinusoidalPosEmb, Attention, QKV, JointAttention, JointFactorizedAttention, FeedForward
-from timm.models.vision_transformer import PatchEmbed, Mlp
 import torch.functional as F
 from einops import rearrange, pack, unpack
 
@@ -66,7 +65,7 @@ class PatchVideo(nn.Module):
         # Reshape to (N, C, num_time_patches * patch_length, num_length_patches * patch_width, num_width_patches)
         imgs = x.reshape(shape=(b, dim_chnl, t * pt, h  * pl, w* pw))
         return imgs
-    
+
 def interleave_masks(x, binary_vector):
     b, c, t, h, w = x.shape
     binary_vector = binary_vector.to(torch.int32)
@@ -84,6 +83,35 @@ def interleave_actions(x, action):
     x = torch.cat([x, action_expanded], dim=1)  # New shape: (B, C + C_action, T, H, W)
     return x
 
+class PatchVideoPastMask(nn.Module):
+    def __init__(self, 
+                 dim_c,
+                 dim_t,
+                 dim_h,
+                 dim_w,
+                 dim_hidden,
+                 patch_s = 2,
+                 patch_t = 1
+                 ):
+        super().__init__()
+        self.patch_s = patch_s
+        self.patch_t = patch_t
+        self.dim_c = dim_c
+        self.dim_t = dim_t
+        self.dim_h = dim_h
+        self.dim_w = dim_w
+        self.dim_hidden = dim_hidden
+        block_size = (self.patch_t, self.patch_s, self.patch_s)
+        self.proj = nn.Conv3d(dim_c + 1,
+                              dim_hidden, 
+                              kernel_size=block_size,
+                              stride=block_size)
+    def forward(self, x):
+        b, c, t, h, w = x.shape
+        x = interleave_masks(binary_vector)
+        x = self.proj(x)
+        return x
+    
 class AdaLayerNormZero(nn.Module):
     def __init__(self, input_dim, embedding_dim: int, param_factor, bias=True, n_context=0):
         super().__init__()
@@ -246,6 +274,7 @@ class MMDiTBlock(nn.Module):
         a = pos_embedder(a)
         p, f = unpack(a, pack_info, 'b h * d')
         return p, f
+    
     def initialize_weights(self):
         def _basic_init(module):
             if isinstance(module, nn.Linear):
@@ -261,7 +290,49 @@ class MMDiTBlock(nn.Module):
             self.ff_pv.apply(_basic_init)
             self.ff_ca.apply(_basic_init)
             self.ff_pa.apply(_basic_init)
+
+class MMDiTBlockModalitySharing(MMDiTBlock):
+    def __init__(self, token_dim, time_dim, skip_context_ff=False):
+        nn.Module.__init__(self)
+        self.token_dim = token_dim
+        self.act = nn.GELU()
+        self.num_heads = 8
+        self.qk_norm = False
         
+        self.time_scale_shift = AdaLayerNormZero(time_dim, token_dim, param_factor=6, n_context=3)
+        # notice how elementwise_affine=False because we are using AdaLNZero blocks
+        
+        self.attn_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
+        
+        self.qkv_fv = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+        self.qkv_pv = self.qkv_fv
+        self.qkv_fa = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+        self.qkv_pa = self.qkv_fa
+        
+        self.joint_attn = JointAttention(
+            token_dim, 
+            num_heads=8,
+        )
+        
+        self.ff_cv = FeedForward(token_dim, act=self.act)
+        self.skip_context_ff = skip_context_ff
+        if not skip_context_ff:
+            self.ff_pv = self.ff_cv
+            self.ff_ca = FeedForward(token_dim, act=self.act)
+            self.ff_pa = self.ff_ca
+        
+        # notice how elementwise_affine=False because we are using AdaLNZero blocks
+        self.ff_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
+
+        self.initialize_weights()
+
+
 class FinalLayer(nn.Module):
     """
     Based off of Facebook's DiT
