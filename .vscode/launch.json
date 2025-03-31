@@ -86,7 +86,7 @@
             ],
             "justMyCode": false,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "2",
+                "CUDA_VISIBLE_DEVICES": "1,2",
                 "TORCH_NCCL_DEBUG": "INFO",
                 "TORCH_DISTRIBUTED_DEBUG": "DETAIL",
                 "NCCL_P2P_DISABLE": "0",

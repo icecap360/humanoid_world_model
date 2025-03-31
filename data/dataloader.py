@@ -106,7 +106,7 @@ def no_collate_fn(batch):
     return batch
 
 def encode_batch(cfg, batch, vae, accelerator):
-    if 'video_dit' in cfg.model.type:
+    if 'video' in cfg.gen_type.lower():
         batch = encode_video_batch(cfg, batch, vae)
         return batch['future_latents'], encode_video_batch(cfg, batch, vae)
     else:

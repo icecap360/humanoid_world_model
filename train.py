@@ -126,7 +126,7 @@ def main(cfg):
     logging.info(f'model: {cfg.model.type}')
 
     if cfg.one_sample:
-        cfg.train.learning_rate = 8e-5
+        cfg.train.learning_rate = 1e-4 # 8e-5
         cfg.train.lr_warmup_steps = 0
         cfg.train.gradient_accumulation_steps = 1
         cfg.train.batch_size = 4
@@ -193,7 +193,7 @@ def main(cfg):
 
     model = get_model(cfg, latent_channels, conditioning_manager, cfg.image_size // cfg.image_tokenizer.spatial_compression)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.train.learning_rate)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.train.learning_rate, betas=(0.9, 0.99), weight_decay=1e-3)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=cfg.train.lr_warmup_steps,
@@ -227,8 +227,8 @@ def main(cfg):
     conditioning_manager.to(accelerator.device)
     
     # Compile the model
-    # if torch.cuda.is_available() and not cfg.debug:
-        # model = torch.compile(model) #defaults to mode="reduce-overhead"
+    if torch.cuda.is_available() and not cfg.debug:
+        model = torch.compile(model) #defaults to mode="reduce-overhead"
 
     if not cfg.debug:
         ema_model = EMAModel(
@@ -262,7 +262,8 @@ def main(cfg):
         for step, batch in enumerate(train_dataloader):
             if step < start_iter:
                 continue
-
+            if step == 2382:
+                print('time to debug bro!')
             if cfg.one_sample:
                 batch = first_batch
             
@@ -340,7 +341,7 @@ def main(cfg):
                 # Sample some images
                 if accelerator.is_main_process and not cfg.val.skip_img_sample:
                     with torch.no_grad():
-                        if cfg.gen_type == 'video':
+                        if 'video' in cfg.gen_type.lower():
                             sample_videos, sample_grids = sampler.sample_video(
                                 cfg,
                                 train_dataloader,
@@ -370,7 +371,7 @@ def main(cfg):
                                 device=accelerator.device, 
                                 dtype=noisy_latents.dtype)
 
-                        if cfg.gen_type == 'image':
+                        if 'image' in cfg.gen_type.lower():
                             image_grid = make_image_grid(samples, rows=4, cols=4)
                             os.makedirs(eval_dir, exist_ok=True)
                             image_grid.save(path)

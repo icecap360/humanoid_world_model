@@ -1,7 +1,7 @@
 from .unet import UNet
 from .dit_imgs import DiTImgModel
 from diffusers import UNet2DModel
-from .dit_video import VideoDiTModel
+from .dit_video import VideoDiTModel, VideoUViTModel
 
 def get_model(cfg, latent_channels, conditioning_manager, input_size):
     if 'unet' in cfg.model.type:
@@ -53,6 +53,24 @@ def get_model(cfg, latent_channels, conditioning_manager, input_size):
     elif cfg.model.type.lower() == 'video_dit':
         dim_spatial=cfg.image_size // cfg.image_tokenizer.spatial_compression
         return VideoDiTModel(
+            latent_channels,
+            cfg.conditioning.num_past_frames,
+            cfg.conditioning.num_future_frames,
+            cfg.conditioning.num_past_latents,
+            cfg.conditioning.num_future_latents,
+            dim_spatial,
+            dim_spatial,
+            cfg.conditioning.dim_act,
+            cfg.model.token_dim,
+            cfg.model.patch_size,
+            cfg.model.num_layers,
+            cfg.model.num_heads,
+            cfg.model.cfg_prob,
+            discrete_time=cfg.use_discrete_time
+        )
+    elif cfg.model.type.lower() == 'video_uvit':
+        dim_spatial=cfg.image_size // cfg.image_tokenizer.spatial_compression
+        return VideoUViTModel(
             latent_channels,
             cfg.conditioning.num_past_frames,
             cfg.conditioning.num_future_frames,
