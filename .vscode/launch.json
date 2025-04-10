@@ -40,7 +40,7 @@
             "args": ["one_sample=True"],
             "justMyCode": false,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "2"
+                "CUDA_VISIBLE_DEVICES": "0"
             }
         },
         {
@@ -52,7 +52,7 @@
             "args": ["one_sample=True", "debug=True"],
             "justMyCode": false,
             "env": {
-                "CUDA_VISIBLE_DEVICES": "2"
+                "CUDA_VISIBLE_DEVICES": "0"
             }
         },
         {
@@ -81,6 +81,32 @@
                 "localhost:29500",
                 "--nnodes=1",
                 "train.py",
+                "debug=True",
+                // "one_sample=True"
+            ],
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "1,2",
+                "TORCH_NCCL_DEBUG": "INFO",
+                "TORCH_DISTRIBUTED_DEBUG": "DETAIL",
+                "NCCL_P2P_DISABLE": "0",
+                "NCCL_ASYNC_ERROR_HANDLING": "1"
+            }
+        },
+        {
+            "name": "train (no hf + distributed + debug)",
+            "type": "python",
+            "request": "launch",
+            "module": "torch.distributed.run",
+            "console": "integratedTerminal",
+            "args": [
+                "--nproc_per_node=2",
+                "--rdzv_backend", 
+                "c10d",
+                "--rdzv_endpoint", 
+                "localhost:29500",
+                "--nnodes=1",
+                "train_nohuggingface_muon.py",
                 "debug=True",
                 // "one_sample=True"
             ],

@@ -1,12 +1,11 @@
 train:
-  batch_size: 6 
-  learning_rate: 8e-5
-  lr_warmup_steps: 200
+  batch_size: 8 
+  learning_rate: 1e-4
+  lr_warmup_steps: 0
   num_epochs: 500
-  gradient_accumulation_steps: 2
-  mixed_precision: "no"
-  val_iters: 1002
-  save_model_iters: 1000
+  gradient_accumulation_steps: 12
+  val_iters: 5000
+  save_model_iters: 5000
   resume_train: false
   resume_model: "/pub0/qasim/1xgpt/humanoid_world_model/val/12-26-12-49/checkpoint-0-5"
 
@@ -16,7 +15,7 @@ val:
   skip_val_loss: False
   skip_img_sample: False
 
-image_size: 256
+image_size: 192
 debug: False
 one_sample: False
 seed: 0

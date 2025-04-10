@@ -492,7 +492,7 @@ class VideoPositionEmb(VideoRopePosition3DEmb):
         self,
         t: torch.Tensor,
         freqs: torch.Tensor,
-        tensor_format: str = "sbhd",
+        tensor_format: str = "bshd",
     ) -> torch.Tensor:
         """
         Apply rotary positional embedding tensor to the input tensor.

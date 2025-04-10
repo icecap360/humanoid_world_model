@@ -18,19 +18,22 @@ def get_dataloaders(
     coco_val_imgs,
     coco_val_ann,
     conditioning_type,
-    conditioning_manager,
     image_size,
     train_batch_size,
     val_batch_size,
     num_past_frames=None,
     num_future_frames=None,
     vae=None,
+    conditioning_manager=None,
+    return_datasets=False,
 ):
     """Factory function to return train and validation dataloaders based on the dataset type."""
     if data_type == "1xgpt_image":
         assert conditioning_type != "text", "Conditioning must not be 'text' for 1xgpt dataset."
         train_dataset = RawImageDataset(hmwm_train_dir)
         val_dataset = RawImageDataset(hmwm_val_dir)
+        if return_datasets:
+            return train_dataset, val_dataset
     elif data_type == "1xgpt_video":
         assert conditioning_type != "text", "Conditioning must not be 'text' for 1xgpt dataset."
         assert num_past_frames != None
@@ -52,6 +55,8 @@ def get_dataloaders(
                                     n_output=num_future_frames,
                                     with_actions=with_action,
                                     stride=num_past_frames // 2)
+        if return_datasets:
+            return train_dataset, val_dataset
         train_dataloader = DataLoader(train_dataset, batch_size=train_batch_size, shuffle=True,
             # collate_fn=partial(RawVideoDataset_collate_fn, cfg, vae),
             **get_dataloader_kwargs())
@@ -80,6 +85,8 @@ def get_dataloaders(
             text_tokenizer=conditioning_manager.get_module()['text'],
             transform=transform,
         )
+        if return_datasets:
+            return train_dataset, val_dataset
     else:
         raise ValueError(f"Unknown dataset type: {data_type}")
     

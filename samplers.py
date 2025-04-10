@@ -149,6 +149,64 @@ class Sampler:
             img_grid_generated.append( make_image_grid(pred_output_frames[i] + gt_output_frames[i], 2, cfg.conditioning.num_future_frames) )
         return all_pred_video, (img_grid_fullvideo, img_grid_fullvideo_tokenizedprompt, img_grid_generated)
 
+
+    def sample_video_autoregressive(self, cfg, train_dataloader, model, batch_idx, vae, accelerator, guidance_scale, dtype=torch.float32, device='cuda'):
+        n_samples = 4        
+        
+        train_dataloader_iter = iter(train_dataloader)
+        batch = next(train_dataloader_iter)
+        for i in range(batch_idx):
+            batch = next(train_dataloader_iter)
+        latents, batch = encode_batch(cfg, batch, vae, accelerator)
+        for key in batch.keys():
+            batch[key] = batch[key][:n_samples]
+        generator=torch.Generator(device=device).manual_seed(self.seed)
+
+        n_output_frames = 8
+        n_input_frames = 9
+        final_pred_latents = []
+        for i in range(n_output_frames):
+            latents = torch.randn(batch['future_latents'].shape, dtype=dtype, device=device, generator=generator)
+            batch_i = {
+                'noisy_latents': latents,
+                'past_actions': batch['past_actions'][:, i:n_input_frames+i],
+                'future_actions': batch['past_actions'][:, i:n_output_frames+i + n_input_frames],
+                'past_latents': vae.encode(batch['past_latents'][:, i:n_input_frames+i].to(torch.bfloat16))[0],
+            }
+
+            self.scheduler.set_timesteps(self.num_inference_steps)
+            timesteps = self.scheduler.timesteps.to(device)
+            for t in self.progress_bar(timesteps):
+                # 1. predict noise model_output
+                # model_output = unet(latents, t).sample
+                t = t.repeat((batch_i['noisy_latents'][0].shape[0],1))
+                pred_cond = model(batch_i, t, device, use_cfg=False)
+                pred_uncond = model(batch_i, t, device, use_cfg=False, force_drop_context=True)
+                pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+                # 2. compute previous image: x_t -> x_t-1
+                latents = self.scheduler.step(pred, t, latents, generator=generator).prev_sample
+                final_pred_latents.append(latents[:, 0])
+        
+        final_pred_latents = torch.concat(final_pred_latents, 0).move_axis(0, 1)
+        
+        vae = self.vae.module if hasattr(self.vae, "module") else self.vae
+
+        all_pred_latents = torch.concatenate((vae.encode(batch['past_frames'][:n_input_frames])[0][:, n_input_frames], latents), 2) 
+        all_pred_frames = vae.decode(all_pred_latents.to(torch.bfloat16))
+
+        all_pred_video = split_video_to_imgs(denormalize_video(all_pred_frames))
+        pred_output_frames  = split_video_to_imgs(denormalize_video(all_pred_frames[:, :, cfg.conditioning.num_past_frames:]))
+        gt_input_frames = split_video_to_imgs(denormalize_video(batch['past_frames'][:, n_input_frames]))
+        gt_output_frames = split_video_to_imgs(denormalize_video(batch['future_frames']))
+        
+        img_grid_fullvideo = []
+        img_grid_fullvideo_tokenizedprompt = []
+        img_grid_generated = []
+        for i in range(all_pred_frames.shape[0]):
+            img_grid_fullvideo.append( make_image_grid(all_pred_video[i], rows=1, cols=len(all_pred_video[i])) )
+            img_grid_fullvideo_tokenizedprompt.append( make_image_grid(gt_input_frames[i] + pred_output_frames[i], rows=1, cols=len(all_pred_video[i])) )
+            img_grid_generated.append( make_image_grid(pred_output_frames[i] + gt_output_frames[i], 2, cfg.conditioning.num_future_frames) )
+        return all_pred_video, (img_grid_fullvideo, img_grid_fullvideo_tokenizedprompt, img_grid_generated)
     def progress_bar(self, iterable=None, total=None):
         if not hasattr(self, "_progress_bar_config"):
             self._progress_bar_config = {}

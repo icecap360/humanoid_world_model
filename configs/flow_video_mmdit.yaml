@@ -1,14 +1,13 @@
 train:
-  batch_size: 8 
-  learning_rate: 8e-5
-  lr_warmup_steps: 200
+  batch_size: 9 
+  learning_rate: 9e-5
+  lr_warmup_steps: 0
   num_epochs: 500
-  gradient_accumulation_steps: 4
-  mixed_precision: "no"
-  val_iters: 4000
-  save_model_iters: 4000
-  resume_train: false
-  resume_model: "/pub0/qasim/1xgpt/humanoid_world_model/val/12-26-12-49/checkpoint-0-5"
+  gradient_accumulation_steps: 8
+  val_iters: 2000
+  save_model_iters: 2000
+  resume_train: true
+  resume_model: "/pub0/qasim/1xgpt/humanoid_world_model/logs/Flow April-03-09-19/checkpoint-0"
 
 val:
   run: true
@@ -23,12 +22,12 @@ seed: 0
 log_dir: "/pub0/qasim/1xgpt/humanoid_world_model/logs"
 exp_prefix: "VideoDiT"
 dtype: 'bf16'
-mixed_precision: "no"  # Options: ["no", "fp16", "bf16"]
+mixed_precision: "bf16"  # Options: ["no", "fp16", "bf16"]
 gen_type: 'video'
 use_discrete_time: False
 
 model:
-  type: 'video_uvit'
+  type: 'video_dit'
   unet_blocks: [256, 512, 768, 1024, 1536]
   unet_attention_resolutions: [32, 16, 8, 4]
   noise_steps:  100

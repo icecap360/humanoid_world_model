@@ -3,7 +3,7 @@ import torch
 from .common_blocks import SinusoidalPosEmb, VideoPositionEmb, ActionPositionEmb
 import torch.functional as F
 from einops import pack, unpack
-from .dit_video_blocks import PatchVideo, MMDiTBlock, PatchVideoTempMask, MMDiTBlockModalitySharing,MMDiTBlockFullSharing,  FinalLayer, interleave_masks_1d, interleave_masks_2d
+from .dit_video_blocks import PatchVideo, MMDiTBlock, PatchVideoTempMask, MMDiTBlockModalitySharing,MMDiTBlockFullSharing, MMDiTBlockHyperConnections,  FinalLayer, interleave_masks_1d, interleave_masks_2d
 
 from .model import Model
 
@@ -116,7 +116,7 @@ class VideoDiTModel(Model):
                     skip_context_ff = True
                 )
             else:
-                block = MMDiTBlock(
+                block = MMDiTBlockHyperConnections(
                     self.dim_hidden,
                     self.dim_hidden,
                     num_heads=self.n_head,
@@ -129,9 +129,14 @@ class VideoDiTModel(Model):
             out_channels=self.dim_C
         )
 
-        self.empty_past_frames_emb = torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)) # nn.Parameter(torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
-        self.empty_past_actions_emb = torch.zeros((self.dim_Tp, self.dim_act)) # nn.Parameter(torch.zeros((self.dim_Tp, self.dim_act)))
-        self.empty_future_actions_emb = torch.zeros((self.dim_Tf, self.dim_act)) # nn.Parameter(torch.zeros((self.dim_Tf, self.dim_act)))
+        self.register_buffer('empty_past_frames_emb', torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
+        # self.empty_past_frames_emb = nn.Parameter(torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
+
+        self.register_buffer('empty_past_actions_emb', torch.zeros((self.dim_Tp, self.dim_act)))
+        # self.empty_past_actions_emb = nn.Parameter(torch.zeros((self.dim_Tp, self.dim_act)))
+
+        self.register_buffer('empty_future_actions_emb', torch.zeros((self.dim_Tf, self.dim_act)))
+        # self.empty_future_actions_emb = nn.Parameter(torch.zeros((self.dim_Tf, self.dim_act)))
         
         self.cfg_prob = cfg_prob
         # self.conditioning_manager = conditioning_manager

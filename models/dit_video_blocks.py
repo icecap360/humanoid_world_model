@@ -250,14 +250,14 @@ class MMDiTBlock(nn.Module):
             (q_pa, k_pa, v_pa),
         ])
         
-        fv = fv + gate(self.attn_norm_cv(fv_res), fv_post_attn_gamma) 
-        pv = pv + gate(self.attn_norm_pv(pv_res), pv_post_attn_gamma) 
-        fa = fa + gate(self.attn_norm_ca(fa_res), fa_post_attn_gamma) 
-        pa = pa + gate(self.attn_norm_pa(pa_res), pa_post_attn_gamma) 
+        fv = fv + gate(fv_res, fv_post_attn_gamma) 
+        pv = pv + gate(pv_res, pv_post_attn_gamma) 
+        fa = fa + gate(fa_res, fa_post_attn_gamma) 
+        pa = pa + gate(pa_res, pa_post_attn_gamma) 
 
         fv_res = modulate(self.ff_norm_cv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
         fv_res = self.ff_cv(fv_res) 
-        fv = fv + gate(self.ff_norm_cv(fv_res), fv_post_ff_gamma) 
+        fv = fv + gate(fv_res, fv_post_ff_gamma) 
         fv = rearrange(fv, 'b (t h w) d -> b d t h w', h=h, w=w)
 
         if not self.skip_context_ff:
@@ -269,9 +269,9 @@ class MMDiTBlock(nn.Module):
             fa_res = self.ff_ca(fa_res) 
             pa_res = self.ff_pa(pa_res) 
         
-            pv = pv + gate(self.ff_norm_pv(pv_res), pv_post_ff_gamma) 
-            fa = fa + gate(self.ff_norm_ca(fa_res), fa_post_ff_gamma) 
-            pa = pa + gate(self.ff_norm_pa(pa_res), pa_post_ff_gamma) 
+            pv = pv + gate(pv_res, pv_post_ff_gamma) 
+            fa = fa + gate(fa_res, fa_post_ff_gamma) 
+            pa = pa + gate(pa_res, pa_post_ff_gamma) 
         
         pv = rearrange(pv, 'b (t h w) d -> b d t h w', h=h, w=w)
         return fv, pv, fa, pa
@@ -400,6 +400,321 @@ class FinalLayer(nn.Module):
         x = rearrange(x, 'b (t h w) d -> b d t h w', 
                 b=b, t=t, h=h, w=w)
         return x
+
+from hyper_connections import HyperConnections, get_init_and_expand_reduce_stream_functions
+
+class MMDiTBlockHyperConnections(MMDiTBlock):
+    def __init__(self, token_dim, time_dim, num_heads, skip_context_ff=False):
+        super().__init__(token_dim, time_dim, num_heads, skip_context_ff)
+        init_hyper_conn_fv_attn, expand_stream_fv_attn, reduce_stream_fv_attn = get_init_and_expand_reduce_stream_functions(1)
+        init_hyper_conn_pv_attn, expand_stream_pv_attn, reduce_stream_pv_attn = get_init_and_expand_reduce_stream_functions(1)
+        init_hyper_conn_fa_attn, expand_stream_fa_attn, reduce_stream_fa_attn = get_init_and_expand_reduce_stream_functions(1)
+        init_hyper_conn_pa_attn, expand_stream_pa_attn, reduce_stream_pa_attn = get_init_and_expand_reduce_stream_functions(1)
+
+        # For feed-forward branch on each stream
+        init_hyper_conn_fv_ff, expand_stream_fv_ff, reduce_stream_fv_ff = get_init_and_expand_reduce_stream_functions(1)
+        init_hyper_conn_pv_ff, expand_stream_pv_ff, reduce_stream_pv_ff = get_init_and_expand_reduce_stream_functions(1)
+        init_hyper_conn_fa_ff, expand_stream_fa_ff, reduce_stream_fa_ff = get_init_and_expand_reduce_stream_functions(1)
+        init_hyper_conn_pa_ff, expand_stream_pa_ff, reduce_stream_pa_ff = get_init_and_expand_reduce_stream_functions(1)
+        # Initialize independent hyperconnection modules for each stream for attention branch
+        self.attn_hyper_fv = init_hyper_conn_fv_attn(dim=token_dim)
+        self.attn_hyper_pv = init_hyper_conn_pv_attn(dim=token_dim)
+        self.attn_hyper_fa = init_hyper_conn_fa_attn(dim=token_dim)
+        self.attn_hyper_pa = init_hyper_conn_pa_attn(dim=token_dim)
+        
+        # and for feed-forward branch
+        self.ff_hyper_fv = init_hyper_conn_fv_ff(dim=token_dim)
+        self.ff_hyper_pv = init_hyper_conn_pv_ff(dim=token_dim)
+        self.ff_hyper_fa = init_hyper_conn_fa_ff(dim=token_dim)
+        self.ff_hyper_pa = init_hyper_conn_pa_ff(dim=token_dim)
+
+        self.expand_stream_fv_attn = expand_stream_fv_attn
+        self.reduce_stream_fv_attn = reduce_stream_fv_attn
+        self.expand_stream_pv_attn = expand_stream_pv_attn
+        self.reduce_stream_pv_attn = reduce_stream_pv_attn
+        self.expand_stream_fa_attn = expand_stream_fa_attn
+        self.reduce_stream_fa_attn = reduce_stream_fa_attn
+        self.expand_stream_pa_attn = expand_stream_pa_attn
+        self.reduce_stream_pa_attn = reduce_stream_pa_attn
+
+        self.expand_stream_fv_ff = expand_stream_fv_ff
+        self.reduce_stream_fv_ff = reduce_stream_fv_ff
+        self.expand_stream_pv_ff = expand_stream_pv_ff
+        self.reduce_stream_pv_ff = reduce_stream_pv_ff
+        self.expand_stream_fa_ff = expand_stream_fa_ff
+        self.reduce_stream_fa_ff = reduce_stream_fa_ff
+        self.expand_stream_pa_ff = expand_stream_pa_ff
+        self.reduce_stream_pa_ff = reduce_stream_pa_ff
+    
+    def forward(self, fv, pv, fa, pa, timesteps, video_pos_embed, action_pos_embed):
+        '''
+        fv - future video
+        pv - past video
+        fa - future actions 
+        pa - past actions
+        '''
+        _, _, _, h, w = fv.shape
+        
+        # Obtain time-dependent scaling parameters
+        (
+            fv_pre_attn_gamma,
+            fv_post_attn_gamma,
+            fv_pre_ff_gamma,
+            fv_post_ff_gamma,
+            fv_pre_attn_beta,
+            fv_pre_ff_beta,
+            
+            pv_pre_attn_gamma,
+            pv_post_attn_gamma,
+            pv_pre_ff_gamma,
+            pv_post_ff_gamma,
+            pv_pre_attn_beta,
+            pv_pre_ff_beta,
+            
+            fa_pre_attn_gamma,
+            fa_post_attn_gamma,
+            fa_pre_ff_gamma,
+            fa_post_ff_gamma,
+            fa_pre_attn_beta,
+            fa_pre_ff_beta,
+
+            pa_pre_attn_gamma,
+            pa_post_attn_gamma,
+            pa_pre_ff_gamma,
+            pa_post_ff_gamma,
+            pa_pre_attn_beta,
+            pa_pre_ff_beta
+        ) = self.time_scale_shift(timesteps)
+
+        # Rearranging video streams from (b, d, t, h, w) to (b, t*h*w, d)
+        fv = rearrange(fv, 'b d t h w -> b (t h w) d')
+        pv = rearrange(pv, 'b d t h w -> b (t h w) d')
+        
+        # ------------------ Attention Branch ------------------
+        # Pre-attention modulation for each stream
+        fv_mod = modulate(self.attn_norm_cv(fv), fv_pre_attn_gamma, fv_pre_attn_beta)
+        pv_mod = modulate(self.attn_norm_pv(pv), pv_pre_attn_gamma, pv_pre_attn_beta)
+        fa_mod = modulate(self.attn_norm_ca(fa), fa_pre_attn_gamma, fa_pre_attn_beta)
+        pa_mod = modulate(self.attn_norm_pa(pa), pa_pre_attn_gamma, pa_pre_attn_beta)
+        
+        q_fv, k_fv, v_fv = self.qkv_fv(fv_mod)
+        q_pv, k_pv, v_pv = self.qkv_pv(pv_mod)
+        q_fa, k_fa, v_fa = self.qkv_fa(fa_mod)
+        q_pa, k_pa, v_pa = self.qkv_pa(pa_mod)
+        
+        # Apply positional embeddings
+        q_pv, q_fv = self.pos_embed_pf(q_pv, q_fv, video_pos_embed)
+        k_pv, k_fv = self.pos_embed_pf(k_pv, k_fv, video_pos_embed)
+        q_pa, q_fa = self.pos_embed_pf(q_pa, q_fa, action_pos_embed)
+        k_pa, k_fa = self.pos_embed_pf(k_pa, k_fa, action_pos_embed)
+        
+        # Joint attention computation across all streams
+        fv_res, pv_res, fa_res, pa_res = self.joint_attn([
+            (q_fv, k_fv, v_fv),
+            (q_pv, k_pv, v_pv),
+            (q_fa, k_fa, v_fa),
+            (q_pa, k_pa, v_pa),
+        ])
+        
+        # --- Hyperconnection for Attention Residual Updates ---
+        # Process each stream independently using its own hyperconnection:
+        # Future video (fv)
+        fv_attn = gate(fv_res, fv_post_attn_gamma)
+        fv_attn = fv_attn.unsqueeze(1)  # shape: (b,1, tokens, token_dim)
+        fv_attn = self.expand_stream_fv_attn(fv_attn)
+        fv_attn = self.attn_hyper_fv.decorate_branch(lambda x: x)(fv_attn)
+        fv_attn = self.reduce_stream_fv_attn(fv_attn).squeeze(1)
+        fv = fv + fv_attn
+
+        # Past video (pv)
+        pv_attn = gate(pv_res, pv_post_attn_gamma)
+        pv_attn = pv_attn.unsqueeze(1)
+        pv_attn = self.expand_stream_pv_attn(pv_attn)
+        pv_attn = self.attn_hyper_pv.decorate_branch(lambda x: x)(pv_attn)
+        pv_attn = self.reduce_stream_pv_attn(pv_attn).squeeze(1)
+        pv = pv + pv_attn
+
+        # Future actions (fa)
+        fa_attn = gate(fa_res, fa_post_attn_gamma)
+        fa_attn = fa_attn.unsqueeze(1)
+        fa_attn = self.expand_stream_fa_attn(fa_attn)
+        fa_attn = self.attn_hyper_fa.decorate_branch(lambda x: x)(fa_attn)
+        fa_attn = self.reduce_stream_fa_attn(fa_attn).squeeze(1)
+        fa = fa + fa_attn
+
+        # Past actions (pa)
+        pa_attn = gate(pa_res, pa_post_attn_gamma)
+        pa_attn = pa_attn.unsqueeze(1)
+        pa_attn = self.expand_stream_pa_attn(pa_attn)
+        pa_attn = self.attn_hyper_pa.decorate_branch(lambda x: x)(pa_attn)
+        pa_attn = self.reduce_stream_pa_attn(pa_attn).squeeze(1)
+        pa = pa + pa_attn
+        
+        # ------------------ Feed-Forward Branch ------------------
+        # Future video feed-forward
+        fv_ff = modulate(self.ff_norm_cv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
+        fv_ff = self.ff_cv(fv_ff)
+        fv_ff = gate(fv_ff, fv_post_ff_gamma)
+        fv_ff = fv_ff.unsqueeze(1)
+        fv_ff = self.expand_stream_fv_ff(fv_ff)
+        fv_ff = self.ff_hyper_fv.decorate_branch(lambda x: x)(fv_ff)
+        fv_ff = self.reduce_stream_fv_ff(fv_ff).squeeze(1)
+        fv = fv + fv_ff
+
+        # Past video feed-forward
+        pv_ff = modulate(self.ff_norm_pv(pv), pv_pre_ff_gamma, pv_pre_ff_beta)
+        pv_ff = self.ff_pv(pv_ff)
+        pv_ff = gate(pv_ff, pv_post_ff_gamma)
+        pv_ff = pv_ff.unsqueeze(1)
+        pv_ff = self.expand_stream_pv_ff(pv_ff)
+        pv_ff = self.ff_hyper_pv.decorate_branch(lambda x: x)(pv_ff)
+        pv_ff = self.reduce_stream_pv_ff(pv_ff).squeeze(1)
+        pv = pv + pv_ff
+
+        # Future actions feed-forward
+        if not self.skip_context_ff:
+            fa_ff = modulate(self.ff_norm_ca(fa), fa_pre_ff_gamma, fa_pre_ff_beta)
+            fa_ff = self.ff_ca(fa_ff)
+            fa_ff = gate(fa_ff, fa_post_ff_gamma)
+        else:
+            fa_ff = torch.zeros_like(fv_ff)
+        fa_ff = fa_ff.unsqueeze(1)
+        fa_ff = self.expand_stream_fa_ff(fa_ff)
+        fa_ff = self.ff_hyper_fa.decorate_branch(lambda x: x)(fa_ff)
+        fa_ff = self.reduce_stream_fa_ff(fa_ff).squeeze(1)
+        fa = fa + fa_ff
+
+        # Past actions feed-forward
+        if not self.skip_context_ff:
+            pa_ff = modulate(self.ff_norm_pa(pa), pa_pre_ff_gamma, pa_pre_ff_beta)
+            pa_ff = self.ff_pa(pa_ff)
+            pa_ff = gate(pa_ff, pa_post_ff_gamma)
+        else:
+            pa_ff = torch.zeros_like(fv_ff)
+        pa_ff = pa_ff.unsqueeze(1)
+        pa_ff = self.expand_stream_pa_ff(pa_ff)
+        pa_ff = self.ff_hyper_pa.decorate_branch(lambda x: x)(pa_ff)
+        pa_ff = self.reduce_stream_pa_ff(pa_ff).squeeze(1)
+        pa = pa + pa_ff
+        pv = rearrange(pv, 'b (t h w) d -> b d t h w', h=h, w=w)
+        fv = rearrange(fv, 'b (t h w) d -> b d t h w', h=h, w=w)
+
+        return fv, pv, fa, pa
+
+# class MMDiTBlockHyperConnections(MMDiTBlock):
+#     def __init__(self, token_dim, time_dim, num_heads, skip_context_ff=False):
+#         super().__init__(token_dim, time_dim, num_heads, skip_context_ff)
+#         self.residualfn_attn_fv = HyperConnections(1, dim=token_dim)
+#         self.residualfn_attn_pv = HyperConnections(1, dim=token_dim)
+#         self.residualfn_attn_fa = HyperConnections(1, dim=token_dim)
+#         self.residualfn_attn_pa = HyperConnections(1, dim=token_dim)
+
+#         self.residualfn_ff_fv = HyperConnections(1, dim=token_dim)
+#         self.residualfn_ff_pv = HyperConnections(1, dim=token_dim)
+#         self.residualfn_ff_fa = HyperConnections(1, dim=token_dim)
+#         self.residualfn_ff_pa = HyperConnections(1, dim=token_dim)
+    
+#     def forward(self, fv, pv, fa, pa, timesteps, video_pos_embed, action_pos_embed):
+#         '''
+#         fv - future video
+#         pv - past video
+#         fa - future actions 
+#         pa - past actions
+#         '''
+#         _, _, _, h, w = fv.shape
+        
+#         (
+#             fv_pre_attn_gamma,
+#             fv_post_attn_gamma,
+#             fv_pre_ff_gamma,
+#             fv_post_ff_gamma,
+#             fv_pre_attn_beta,
+#             fv_pre_ff_beta,
+            
+#             pv_pre_attn_gamma,
+#             pv_post_attn_gamma,
+#             pv_pre_ff_gamma,
+#             pv_post_ff_gamma,
+#             pv_pre_attn_beta,
+#             pv_pre_ff_beta,
+            
+#             fa_pre_attn_gamma,
+#             fa_post_attn_gamma,
+#             fa_pre_ff_gamma,
+#             fa_post_ff_gamma,
+#             fa_pre_attn_beta,
+#             fa_pre_ff_beta,
+
+#             pa_pre_attn_gamma,
+#             pa_post_attn_gamma,
+#             pa_pre_ff_gamma,
+#             pa_post_ff_gamma,
+#             pa_pre_attn_beta,
+#             pa_pre_ff_beta
+#         ) = self.time_scale_shift(timesteps)
+
+#         fv = rearrange(fv, 'b d t h w -> b (t h w) d')
+#         pv = rearrange(pv, 'b d t h w -> b (t h w) d')
+        
+#         fv, add_fv_residual = self.residualfn_attn_fv(fv)
+#         pv, add_pv_residual = self.residualfn_attn_fv(pv)
+#         fa, add_fa_residual = self.residualfn_attn_fv(fa)
+#         pa, add_pa_residual = self.residualfn_attn_fv(pa)
+        
+#         fv_res = modulate(self.attn_norm_cv(fv), fv_pre_attn_gamma, fv_pre_attn_beta) 
+#         pv_res = modulate(self.attn_norm_pv(pv), pv_pre_attn_gamma, pv_pre_attn_beta) 
+#         fa_res = modulate(self.attn_norm_ca(fa), fa_pre_attn_gamma, fa_pre_attn_beta) 
+#         pa_res = modulate(self.attn_norm_pa(pa), pa_pre_attn_gamma, pa_pre_attn_beta) 
+        
+#         q_fv, k_fv, v_fv = self.qkv_fv(fv_res)
+#         q_pv, k_pv, v_pv = self.qkv_pv(pv_res)
+#         q_fa, k_fa, v_fa = self.qkv_fa(fa_res)
+#         q_pa, k_pa, v_pa = self.qkv_pa(pa_res)
+        
+#         q_pv, q_fv = self.pos_embed_pf(q_pv, q_fv, video_pos_embed)
+#         k_pv, k_fv = self.pos_embed_pf(k_pv, k_fv, video_pos_embed)
+
+#         q_pa, q_fa = self.pos_embed_pf(q_pa, q_fa, action_pos_embed)
+#         k_pa, k_fa = self.pos_embed_pf(k_pa, k_fa, action_pos_embed)
+
+#         fv_res, pv_res, fa_res, pa_res = self.joint_attn([
+#             (q_fv, k_fv, v_fv),
+#             (q_pv, k_pv, v_pv),
+#             (q_fa, k_fa, v_fa),
+#             (q_pa, k_pa, v_pa),
+#         ])
+        
+#         fv = add_fv_residual(gate(fv_res, fv_post_attn_gamma))
+#         pv = add_pv_residual(gate(pv_res, pv_post_attn_gamma))
+#         fa = add_fa_residual(gate(fa_res, fa_post_attn_gamma))
+#         pa = add_pa_residual(gate(pa_res, pa_post_attn_gamma))
+
+#         fv, add_fv_residual = self.residualfn_ff_fv(fv)
+#         pv, add_pv_residual = self.residualfn_ff_fv(pv)
+#         fa, add_fa_residual = self.residualfn_ff_fv(fa)
+#         pa, add_pa_residual = self.residualfn_ff_fv(pa)
+
+#         fv_res = modulate(self.ff_norm_cv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
+#         fv_res = self.ff_cv(fv_res) 
+#         fv = add_fv_residual(gate(fv_res, fv_post_ff_gamma) )
+
+#         if not self.skip_context_ff:
+#             pv_res = modulate(self.ff_norm_pv(pv), pv_pre_ff_gamma, pv_pre_ff_beta) 
+#             fa_res = modulate(self.ff_norm_ca(fa), fa_pre_ff_gamma, fa_pre_ff_beta) 
+#             pa_res = modulate(self.ff_norm_pa(pa), pa_pre_ff_gamma, pa_pre_ff_beta) 
+
+#             pv_res = self.ff_pv(pv_res) 
+#             fa_res = self.ff_ca(fa_res) 
+#             pa_res = self.ff_pa(pa_res) 
+
+#             pv = add_pv_residual(gate(pv_res, pv_post_ff_gamma))
+#             fa = add_fa_residual(gate(fa_res, fa_post_ff_gamma))
+#             pa = add_pa_residual(gate(pa_res, pa_post_ff_gamma))
+        
+#         fv = rearrange(fv, 'b (t h w) d -> b d t h w', h=h, w=w)
+#         pv = rearrange(pv, 'b (t h w) d -> b d t h w', h=h, w=w)
+#         return fv, pv, fa, pa
+
 
 if __name__ == '__main__':
     x = torch.randn((5, 16, 8, 64, 64))

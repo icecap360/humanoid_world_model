@@ -3,7 +3,7 @@ from .dit_imgs import DiTImgModel
 from diffusers import UNet2DModel
 from .dit_video import VideoDiTModel, VideoUViTModel
 
-def get_model(cfg, latent_channels, conditioning_manager, input_size):
+def get_model(cfg, latent_channels, input_size, conditioning_manager=None):
     if 'unet' in cfg.model.type:
         model = UNet(latent_channels, 
                 latent_channels, 

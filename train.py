@@ -12,9 +12,8 @@ from einops import rearrange
 import wandb
 from cosmos_tokenizer.image_lib import ImageTokenizer
 from cosmos_tokenizer.video_lib import CausalVideoTokenizer
-from cosmos_tokenizer.utils import (
-    numpy2tensor
-)
+from itertools import islice
+
 import hydra
 from collections import OrderedDict
 from omegaconf import DictConfig, OmegaConf
@@ -133,7 +132,7 @@ def main(cfg):
         cfg.val.batch_size = 1
         cfg.exp_prefix = 'one-sample'
         cfg.train.save_model_iters = 6000
-        cfg.train.val_iters = 5
+        cfg.train.val_iters = 2
         cfg.conditioning.prompt_file = 'prompts_one_sample.txt'
         cfg.val.run = True
         cfg.val.skip_val_loss = True
@@ -193,7 +192,7 @@ def main(cfg):
 
     model = get_model(cfg, latent_channels, conditioning_manager, cfg.image_size // cfg.image_tokenizer.spatial_compression)
 
-    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.train.learning_rate, betas=(0.9, 0.99), weight_decay=1e-3)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.train.learning_rate, betas=(0.9, 0.99), weight_decay=1e-2)
     lr_scheduler = get_cosine_schedule_with_warmup(
         optimizer=optimizer,
         num_warmup_steps=cfg.train.lr_warmup_steps,
@@ -227,8 +226,8 @@ def main(cfg):
     conditioning_manager.to(accelerator.device)
     
     # Compile the model
-    if torch.cuda.is_available() and not cfg.debug:
-        model = torch.compile(model) #defaults to mode="reduce-overhead"
+    # if torch.cuda.is_available() and not cfg.debug:
+    #     model = torch.compile(model) #defaults to mode="reduce-overhead"
 
     if not cfg.debug:
         ema_model = EMAModel(
@@ -253,17 +252,18 @@ def main(cfg):
         first_batch = next(iter(train_dataloader))
     global_step = 0
     grad_norm = 0.0
+    val_iters = int(cfg.train.val_iters * cfg.train.gradient_accumulation_steps)
+    save_model_iters = int(cfg.train.save_model_iters * cfg.train.gradient_accumulation_steps)
 
     for epoch in range(start_epoch, cfg.train.num_epochs):
         if accelerator.is_main_process:
-            progress_bar = tqdm.tqdm(total=len(train_dataloader), disable=not accelerator.is_local_main_process)
+            progress_bar = tqdm.tqdm(total=len(train_dataloader) // cfg.train.gradient_accumulation_steps, disable=not accelerator.is_local_main_process)
             progress_bar.set_description(f"Epoch {epoch}")
 
-        for step, batch in enumerate(train_dataloader):
-            if step < start_iter:
-                continue
-            if step == 2382:
-                print('time to debug bro!')
+        # for step, batch in enumerate(train_dataloader):
+        for step, batch in enumerate(islice(train_dataloader, start_iter, None), start=start_iter):
+            # if step < start_iter:
+                # continue
             if cfg.one_sample:
                 batch = first_batch
             
@@ -298,7 +298,7 @@ def main(cfg):
                     ema_model.step(model)
                 optimizer.zero_grad()
                 
-            if accelerator.is_main_process:
+            if accelerator.sync_gradients and accelerator.is_main_process:
                 logs = OrderedDict({
                     "train/loss": loss.detach().item(),
                     "train/lr": lr_scheduler.get_last_lr()[0],
@@ -306,20 +306,20 @@ def main(cfg):
                     "train/epoch": epoch,
                     "train/step": global_step,
                 })
+                global_step += 1
                 progress_bar.update(1)
                 progress_bar.set_postfix(ordered_dict=logs)
                 if not cfg.debug: 
                     wandb.log(logs)
-                if step % cfg.train.save_model_iters == 0 and step > 0 and not cfg.debug:
+                if (step+1) % save_model_iters == 0 and step > cfg.train.gradient_accumulation_steps and not cfg.debug:
                     os.makedirs(eval_dir, exist_ok=True)    
-                    path = eval_dir / ('checkpoint-' +str(epoch) + str(step))
+                    path = eval_dir / ('checkpoint-' +str(epoch) + '-' + str(step))
                     accelerator.save_state(path, safe_serialization=True)
                     ema_model.store(model.parameters())
                     ema_model.copy_to(model.parameters())
                     accelerator.save_model(model,eval_dir / ('checkpoint-' +str(epoch)) / "ema")
                     ema_model.restore(model.parameters())
-
-            if (step % cfg.train.val_iters == 0 or step == len(train_dataloader) - 1) and step > 0 and cfg.val.run:
+            if (accelerator.sync_gradients and ((step+1) % val_iters == 0 or step == len(train_dataloader) - 1)) and step > cfg.train.gradient_accumulation_steps and cfg.val.run:
                 path = eval_dir / ('samples-' + str(epoch) + '-' + str(step) + '.png')
                 if cfg.debug:
                     path = 'debug/debug.png'
@@ -410,7 +410,6 @@ def main(cfg):
                                         f"samples/gtprompt+predictions-{i}": wandb.Image(str(path_img1), caption=f"Epoch {epoch}, iter {step}")
                                     })
                                     # wandb.log({"samples/video": wandb.Video(path_vid, fps=0.2, format="mp4")})
-            global_step += 1
 
         start_iter = 0
         if accelerator.is_main_process and not cfg.debug:
@@ -419,7 +418,7 @@ def main(cfg):
             accelerator.save_state(path, safe_serialization=True)
             ema_model.store(model.parameters())
             ema_model.copy_to(model.parameters())
-            accelerator.save_model(model, eval_dir / ('checkpoint-' +str(epoch)) / "ema")
+            accelerator.save_model(model, eval_dir / ('checkpoint-' +str(epoch)+'-final') / "ema")
             ema_model.restore(model.parameters())
 
     if accelerator.is_main_process and not cfg.debug:
