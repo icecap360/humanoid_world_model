@@ -26,6 +26,7 @@ def get_dataloaders(
     vae=None,
     conditioning_manager=None,
     return_datasets=False,
+    val_stride=None
 ):
     """Factory function to return train and validation dataloaders based on the dataset type."""
     if data_type == "1xgpt_image":
@@ -47,14 +48,14 @@ def get_dataloaders(
                                         n_input=num_past_frames,
                                         n_output=num_future_frames,
                                         with_actions=with_action,
-                                        stride=num_past_frames // 2)
+                                        stride=1) # num_past_frames // 2
         val_dataset = RawVideoDataset(hmwm_val_dir,
                                     cfg,
                                     vae,
                                     n_input=num_past_frames,
                                     n_output=num_future_frames,
                                     with_actions=with_action,
-                                    stride=num_past_frames // 2)
+                                    stride=num_past_frames // 2 if val_stride==None else val_stride)
         if return_datasets:
             return train_dataset, val_dataset
         train_dataloader = DataLoader(train_dataset, batch_size=train_batch_size, shuffle=True,

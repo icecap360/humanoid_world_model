@@ -43,7 +43,63 @@ class QKV(nn.Module):
         v = rearrange(v, '... n h d-> ... h n d', h=self.num_heads, d=self.head_dim)
         
         return q, k, v
+
+class KV(nn.Module):
+    def __init__(
+        self, dim: int, num_heads: int = 8, qkv_bias: bool = False, qk_norm: bool = False, 
+        norm_layer: nn.Module = nn.LayerNorm
+    ) -> None:
+        super().__init__()
+        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        
+        self.kv = nn.Linear(dim, dim * 2, bias=qkv_bias)
+        # Normalization operates over the last dimension (head_dim)
+        self.k_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        # self.proj = nn.Linear(dim, dim)
     
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        
+        qkv = self.kv(x)        
+        qkv = rearrange(qkv, '... (qkv h d) -> ... qkv h d', qkv=2, h=self.num_heads, d=self.head_dim)
+        
+        q, k = qkv[..., 0, :, :], qkv[..., 1, :, :]
+        k = self.k_norm(k)
+        
+        # Reshape to [B, num_heads, N, head_dim]
+        q = rearrange(q, '... n h d-> ... h n d', h=self.num_heads, d=self.head_dim)
+        k = rearrange(k, '... n h d-> ... h n d', h=self.num_heads, d=self.head_dim)        
+        return q, k
+
+class Q(nn.Module):
+    def __init__(
+        self, dim: int, num_heads: int = 8, qkv_bias: bool = False, qk_norm: bool = False, 
+        norm_layer: nn.Module = nn.LayerNorm
+    ) -> None:
+        super().__init__()
+        assert dim % num_heads == 0, 'dim should be divisible by num_heads'
+        self.num_heads = num_heads
+        self.head_dim = dim // num_heads
+        
+        self.q = nn.Linear(dim, dim, bias=qkv_bias)
+        # Normalization operates over the last dimension (head_dim)
+        self.q_norm = norm_layer(self.head_dim) if qk_norm else nn.Identity()
+        # self.proj = nn.Linear(dim, dim)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        
+        qkv = self.q(x)        
+        qkv = rearrange(qkv, '... (qkv h d) -> ... qkv h d', qkv=1, h=self.num_heads, d=self.head_dim)
+        
+        q = qkv[..., 0, :, :]
+        q = self.q_norm(q)
+        
+        # Reshape to [B, num_heads, N, head_dim]
+        q = rearrange(q, '... n h d-> ... h n d', h=self.num_heads, d=self.head_dim)
+        
+        return q
+
 class JointAttention(nn.Module):
     def __init__(
         self, dim: int, num_heads: int = 8, 
@@ -66,8 +122,8 @@ class JointAttention(nn.Module):
             vs.append(qkv[2])
         
         qs, pack_info = pack(qs, 'b h * d')
-        ks, pack_info = pack(ks, 'b h * d')
-        vs, pack_info = pack(vs, 'b h * d')
+        ks, _ = pack(ks, 'b h * d')
+        vs, _ = pack(vs, 'b h * d')
         
         out = scaled_dot_product_attention(qs, ks, vs, dropout_p=self.p_attn_drop if self.training else 0., is_causal=self.is_causal)
         

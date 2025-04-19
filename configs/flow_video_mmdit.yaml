@@ -1,19 +1,20 @@
 train:
-  batch_size: 9 
-  learning_rate: 9e-5
+  batch_size: 27 
+  learning_rate: 1e-4
   lr_warmup_steps: 0
   num_epochs: 500
-  gradient_accumulation_steps: 8
-  val_iters: 2000
-  save_model_iters: 2000
-  resume_train: true
-  resume_model: "/pub0/qasim/1xgpt/humanoid_world_model/logs/Flow April-03-09-19/checkpoint-0"
+  gradient_accumulation_steps: 3
+  val_iters: 4000 # 2000
+  save_model_iters: 2000 # 2000
+  resume_train: false
+  resume_model: "/pub0/qasim/1xgpt/humanoid_world_model/logs/BaseRun -  April-17-20-10/checkpoint-0-55999"
 
 val:
   run: true
-  batch_size: 8
+  batch_size: 16
   skip_val_loss: False
   skip_img_sample: False
+  output_dir: "/pub0/qasim/1xgpt/humanoid_world_model/logs"
 
 image_size: 256
 debug: False
@@ -30,7 +31,7 @@ model:
   type: 'video_dit'
   unet_blocks: [256, 512, 768, 1024, 1536]
   unet_attention_resolutions: [32, 16, 8, 4]
-  noise_steps:  100
+  noise_steps:  50
   scheduler_type: "Flow"
   cfg_scale: 3
   cfg_prob: 0.15

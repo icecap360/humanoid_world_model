@@ -126,5 +126,12 @@
             "program": "eval_diffusion.py",
             "console": "integratedTerminal"
         },
+        {
+            "name": "fid",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "calculate_fid.py",
+            "console": "integratedTerminal"
+        },
     ]
 }

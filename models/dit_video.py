@@ -3,7 +3,7 @@ import torch
 from .common_blocks import SinusoidalPosEmb, VideoPositionEmb, ActionPositionEmb
 import torch.functional as F
 from einops import pack, unpack
-from .dit_video_blocks import PatchVideo, MMDiTBlock, PatchVideoTempMask, MMDiTBlockModalitySharing,MMDiTBlockFullSharing, MMDiTBlockHyperConnections,  FinalLayer, interleave_masks_1d, interleave_masks_2d
+from .dit_video_blocks import PatchVideo, MMDiTBlock, PatchVideoTempMask, MMDiTBlockModalitySharing,MMDiTBlockFullSharing, MMDiTBlockHyperConnections, MMDiTSplitAttentionBlock, FinalLayer, interleave_masks_1d, interleave_masks_2d
 
 from .model import Model
 
@@ -220,6 +220,428 @@ class VideoDiTModel(Model):
         nn.init.constant_(self.final_layer.linear.weight, 0)
         nn.init.constant_(self.final_layer.linear.bias, 0)
 
+class VideoDiTModalitySharingModel(VideoDiTModel):
+    def __init__(self, 
+                dim_C,
+                dim_T_past,
+                dim_T_future,
+                dim_L_past,
+                dim_L_future,
+                dim_W,
+                dim_h,
+                dim_act,
+                dim_hidden,
+                patch_lw,
+                n_layers,
+                n_head,
+                cfg_prob,
+                discrete_time = True,
+                patch_t=1,
+                device='cuda',
+                add_temp_mask = False,
+        ):
+        nn.Module.__init__(self)
+        self.n_layers = n_layers
+        self.n_head = n_head
+        self.patch_lw = patch_lw
+        self.patch_t = patch_t
+
+        self.dim_C, self.dim_Tf, self.dim_Tp, self.dim_H, self.dim_W = dim_C, dim_T_future, dim_T_past, dim_h, dim_W
+        self.dim_Lp = dim_L_past
+        self.dim_Lf = dim_L_future
+        
+        self.dim_act = dim_act
+        self.dim_hidden = dim_hidden
+        self.dim_head = self.dim_hidden // self.n_head
+        self.time_embedder = nn.Sequential(
+            SinusoidalPosEmb(self.dim_hidden, theta=10000),
+            nn.Linear(self.dim_hidden , self.dim_hidden * 4),
+            nn.SiLU(),
+            nn.Linear(self.dim_hidden * 4, self.dim_hidden)
+        )
+
+        self.add_temp_mask = add_temp_mask
+        if add_temp_mask:
+            self.action_embedder = nn.Sequential(
+                nn.Linear(self.dim_act + 1, self.dim_hidden * 4),
+                nn.SiLU(),
+                nn.Linear(self.dim_hidden * 4, self.dim_hidden))
+            self.patcher_f = PatchVideoTempMask(
+                dim_c=self.dim_C,
+                dim_t=self.dim_Lf,
+                dim_h=self.dim_H,
+                dim_w=self.dim_W,
+                dim_hidden=self.dim_hidden,
+                patch_s = self.patch_lw,
+                patch_t = self.patch_t,
+                )
+            self.patcher_p = PatchVideoTempMask(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lp,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+        else:
+            self.action_embedder = nn.Sequential(
+                nn.Linear(self.dim_act , self.dim_hidden * 4),
+                nn.SiLU(),
+                nn.Linear(self.dim_hidden * 4, self.dim_hidden)
+            )
+            self.patcher_f = PatchVideo(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lf,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+            self.patcher_p = PatchVideo(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lp,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+            
+        self.action_pos_embed = ActionPositionEmb(self.dim_Tp + self.dim_Tf, self.dim_head, theta=10000.0) # both future and past tokens simultaneously
+        self.video_pos_embed = VideoPositionEmb(
+            head_dim=self.dim_head,
+            len_h=self.dim_H,
+            len_w=self.dim_W,
+            len_t=self.dim_Lp + self.dim_Lf, # notice how we embed both future and past tokens simultaneously
+            theta=10000.0,
+            device=device
+        )
+        self.blocks = nn.ModuleList()
+        for i in range(4):
+            block = MMDiTBlock(
+                self.dim_hidden,
+                self.dim_hidden,
+                num_heads=self.n_head,
+            )
+            self.blocks.append(block)
+        for i in range(self.n_layers-4):
+            block = None
+            if i == self.n_layers - 1 - 4:
+                block = MMDiTBlockModalitySharing(
+                    self.dim_hidden,
+                    self.dim_hidden,
+                    num_heads=self.n_head,
+                    skip_context_ff = True
+                )
+            else:
+                block = MMDiTBlockModalitySharing(
+                    self.dim_hidden,
+                    self.dim_hidden,
+                    num_heads=self.n_head,
+                )
+            self.blocks.append(block)
+        self.final_layer = FinalLayer(
+            self.dim_hidden,
+            patch_lw=self.patch_lw,
+            patch_t=self.patch_t,
+            out_channels=self.dim_C
+        )
+
+        self.register_buffer('empty_past_frames_emb', torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
+        # self.empty_past_frames_emb = nn.Parameter(torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
+
+        self.register_buffer('empty_past_actions_emb', torch.zeros((self.dim_Tp, self.dim_act)))
+        # self.empty_past_actions_emb = nn.Parameter(torch.zeros((self.dim_Tp, self.dim_act)))
+
+        self.register_buffer('empty_future_actions_emb', torch.zeros((self.dim_Tf, self.dim_act)))
+        # self.empty_future_actions_emb = nn.Parameter(torch.zeros((self.dim_Tf, self.dim_act)))
+        
+        self.cfg_prob = cfg_prob
+        # self.conditioning_manager = conditioning_manager
+        # self.conditioning = conditioning
+        self.initialize_weights()
+
+class VideoDiTFullSharingModel(VideoDiTModel):
+    def __init__(self, 
+                dim_C,
+                dim_T_past,
+                dim_T_future,
+                dim_L_past,
+                dim_L_future,
+                dim_W,
+                dim_h,
+                dim_act,
+                dim_hidden,
+                patch_lw,
+                n_layers,
+                n_head,
+                cfg_prob,
+                discrete_time = True,
+                patch_t=1,
+                device='cuda',
+                add_temp_mask = False,
+        ):
+        nn.Module.__init__(self)
+        self.n_layers = n_layers
+        self.n_head = n_head
+        self.patch_lw = patch_lw
+        self.patch_t = patch_t
+
+        self.dim_C, self.dim_Tf, self.dim_Tp, self.dim_H, self.dim_W = dim_C, dim_T_future, dim_T_past, dim_h, dim_W
+        self.dim_Lp = dim_L_past
+        self.dim_Lf = dim_L_future
+        
+        self.dim_act = dim_act
+        self.dim_hidden = dim_hidden
+        self.dim_head = self.dim_hidden // self.n_head
+        self.time_embedder = nn.Sequential(
+            SinusoidalPosEmb(self.dim_hidden, theta=10000),
+            nn.Linear(self.dim_hidden , self.dim_hidden * 4),
+            nn.SiLU(),
+            nn.Linear(self.dim_hidden * 4, self.dim_hidden)
+        )
+
+        self.add_temp_mask = add_temp_mask
+        if add_temp_mask:
+            self.action_embedder = nn.Sequential(
+                nn.Linear(self.dim_act + 1, self.dim_hidden * 4),
+                nn.SiLU(),
+                nn.Linear(self.dim_hidden * 4, self.dim_hidden))
+            self.patcher_f = PatchVideoTempMask(
+                dim_c=self.dim_C,
+                dim_t=self.dim_Lf,
+                dim_h=self.dim_H,
+                dim_w=self.dim_W,
+                dim_hidden=self.dim_hidden,
+                patch_s = self.patch_lw,
+                patch_t = self.patch_t,
+                )
+            self.patcher_p = PatchVideoTempMask(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lp,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+        else:
+            self.action_embedder = nn.Sequential(
+                nn.Linear(self.dim_act , self.dim_hidden * 4),
+                nn.SiLU(),
+                nn.Linear(self.dim_hidden * 4, self.dim_hidden)
+            )
+            self.patcher_f = PatchVideo(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lf,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+            self.patcher_p = PatchVideo(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lp,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+            
+        self.action_pos_embed = ActionPositionEmb(self.dim_Tp + self.dim_Tf, self.dim_head, theta=10000.0) # both future and past tokens simultaneously
+        self.video_pos_embed = VideoPositionEmb(
+            head_dim=self.dim_head,
+            len_h=self.dim_H,
+            len_w=self.dim_W,
+            len_t=self.dim_Lp + self.dim_Lf, # notice how we embed both future and past tokens simultaneously
+            theta=10000.0,
+            device=device
+        )
+        self.blocks = nn.ModuleList()
+        for i in range(4):
+            block = MMDiTBlock(
+                self.dim_hidden,
+                self.dim_hidden,
+                num_heads=self.n_head,
+            )
+            self.blocks.append(block)
+        for i in range(self.n_layers-4):
+            block = None
+            if i == self.n_layers - 1 - 4:
+                block = MMDiTBlockFullSharing(
+                    self.dim_hidden,
+                    self.dim_hidden,
+                    num_heads=self.n_head,
+                    skip_context_ff = True
+                )
+            else:
+                block = MMDiTBlockFullSharing(
+                    self.dim_hidden,
+                    self.dim_hidden,
+                    num_heads=self.n_head,
+                )
+            self.blocks.append(block)
+        self.final_layer = FinalLayer(
+            self.dim_hidden,
+            patch_lw=self.patch_lw,
+            patch_t=self.patch_t,
+            out_channels=self.dim_C
+        )
+
+        self.register_buffer('empty_past_frames_emb', torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
+        # self.empty_past_frames_emb = nn.Parameter(torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
+
+        self.register_buffer('empty_past_actions_emb', torch.zeros((self.dim_Tp, self.dim_act)))
+        # self.empty_past_actions_emb = nn.Parameter(torch.zeros((self.dim_Tp, self.dim_act)))
+
+        self.register_buffer('empty_future_actions_emb', torch.zeros((self.dim_Tf, self.dim_act)))
+        # self.empty_future_actions_emb = nn.Parameter(torch.zeros((self.dim_Tf, self.dim_act)))
+        
+        self.cfg_prob = cfg_prob
+        # self.conditioning_manager = conditioning_manager
+        # self.conditioning = conditioning
+        self.initialize_weights()
+
+class VideoDiTSplitAttnModel(VideoDiTModel):
+    def __init__(self, 
+                dim_C,
+                dim_T_past,
+                dim_T_future,
+                dim_L_past,
+                dim_L_future,
+                dim_W,
+                dim_h,
+                dim_act,
+                dim_hidden,
+                patch_lw,
+                n_layers,
+                n_head,
+                cfg_prob,
+                discrete_time = True,
+                patch_t=1,
+                device='cuda',
+                add_temp_mask = False,
+        ):
+        nn.Module.__init__(self)
+        self.n_layers = n_layers
+        self.n_head = n_head
+        self.patch_lw = patch_lw
+        self.patch_t = patch_t
+
+        self.dim_C, self.dim_Tf, self.dim_Tp, self.dim_H, self.dim_W = dim_C, dim_T_future, dim_T_past, dim_h, dim_W
+        self.dim_Lp = dim_L_past
+        self.dim_Lf = dim_L_future
+        
+        self.dim_act = dim_act
+        self.dim_hidden = dim_hidden
+        self.dim_head = self.dim_hidden // self.n_head
+        self.time_embedder = nn.Sequential(
+            SinusoidalPosEmb(self.dim_hidden, theta=10000),
+            nn.Linear(self.dim_hidden , self.dim_hidden * 4),
+            nn.SiLU(),
+            nn.Linear(self.dim_hidden * 4, self.dim_hidden)
+        )
+
+        self.add_temp_mask = add_temp_mask
+        if add_temp_mask:
+            self.action_embedder = nn.Sequential(
+                nn.Linear(self.dim_act + 1, self.dim_hidden * 4),
+                nn.SiLU(),
+                nn.Linear(self.dim_hidden * 4, self.dim_hidden))
+            self.patcher_f = PatchVideoTempMask(
+                dim_c=self.dim_C,
+                dim_t=self.dim_Lf,
+                dim_h=self.dim_H,
+                dim_w=self.dim_W,
+                dim_hidden=self.dim_hidden,
+                patch_s = self.patch_lw,
+                patch_t = self.patch_t,
+                )
+            self.patcher_p = PatchVideoTempMask(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lp,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+        else:
+            self.action_embedder = nn.Sequential(
+                nn.Linear(self.dim_act , self.dim_hidden * 4),
+                nn.SiLU(),
+                nn.Linear(self.dim_hidden * 4, self.dim_hidden)
+            )
+            self.patcher_f = PatchVideo(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lf,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+            self.patcher_p = PatchVideo(
+                    dim_c=self.dim_C,
+                    dim_t=self.dim_Lp,
+                    dim_h=self.dim_H,
+                    dim_w=self.dim_W,
+                    dim_hidden=self.dim_hidden,
+                    patch_s = self.patch_lw,
+                    patch_t = self.patch_t,
+                    )
+            
+        self.action_pos_embed = ActionPositionEmb(self.dim_Tp + self.dim_Tf, self.dim_head, theta=10000.0) # both future and past tokens simultaneously
+        self.video_pos_embed = VideoPositionEmb(
+            head_dim=self.dim_head,
+            len_h=self.dim_H,
+            len_w=self.dim_W,
+            len_t=self.dim_Lp + self.dim_Lf, # notice how we embed both future and past tokens simultaneously
+            theta=10000.0,
+            device=device
+        )
+        self.blocks = nn.ModuleList()
+        for i in range(self.n_layers):
+            block = None
+            if i == self.n_layers - 1:
+                block = MMDiTSplitAttentionBlock(
+                    self.dim_hidden,
+                    self.dim_hidden,
+                    num_heads=self.n_head,
+                    skip_context_ff = True
+                )
+            else:
+                block = MMDiTSplitAttentionBlock(
+                    self.dim_hidden,
+                    self.dim_hidden,
+                    num_heads=self.n_head,
+                )
+            self.blocks.append(block)
+        self.final_layer = FinalLayer(
+            self.dim_hidden,
+            patch_lw=self.patch_lw,
+            patch_t=self.patch_t,
+            out_channels=self.dim_C
+        )
+
+        self.register_buffer('empty_past_frames_emb', torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
+        # self.empty_past_frames_emb = nn.Parameter(torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
+
+        self.register_buffer('empty_past_actions_emb', torch.zeros((self.dim_Tp, self.dim_act)))
+        # self.empty_past_actions_emb = nn.Parameter(torch.zeros((self.dim_Tp, self.dim_act)))
+
+        self.register_buffer('empty_future_actions_emb', torch.zeros((self.dim_Tf, self.dim_act)))
+        # self.empty_future_actions_emb = nn.Parameter(torch.zeros((self.dim_Tf, self.dim_act)))
+        
+        self.cfg_prob = cfg_prob
+        # self.conditioning_manager = conditioning_manager
+        # self.conditioning = conditioning
+        self.initialize_weights()
+        
 class VideoUViTModel(VideoDiTModel):
     def __init__(self, 
                 dim_C,

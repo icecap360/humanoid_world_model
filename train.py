@@ -118,6 +118,7 @@ def main(cfg):
     logging.info(f'image_size: {cfg.image_size}')
     logging.info(f'log_dir: {cfg.log_dir}')
     logging.info(f'train_batch_size: {cfg.train.batch_size}')
+    logging.info(f'gradient_accumulation_steps: {cfg.train.gradient_accumulation_steps}')
     logging.info(f'val_iters: {cfg.train.val_iters}')
     logging.info(f'exp_prefix: {cfg.exp_prefix}')
     logging.info(f'data: {cfg.data.type}')
@@ -297,7 +298,7 @@ def main(cfg):
                 if accelerator.sync_gradients and not cfg.debug:
                     ema_model.step(model)
                 optimizer.zero_grad()
-                
+
             if accelerator.sync_gradients and accelerator.is_main_process:
                 logs = OrderedDict({
                     "train/loss": loss.detach().item(),
@@ -311,15 +312,17 @@ def main(cfg):
                 progress_bar.set_postfix(ordered_dict=logs)
                 if not cfg.debug: 
                     wandb.log(logs)
-                if (step+1) % save_model_iters == 0 and step > cfg.train.gradient_accumulation_steps and not cfg.debug:
-                    os.makedirs(eval_dir, exist_ok=True)    
-                    path = eval_dir / ('checkpoint-' +str(epoch) + '-' + str(step))
-                    accelerator.save_state(path, safe_serialization=True)
-                    ema_model.store(model.parameters())
-                    ema_model.copy_to(model.parameters())
-                    accelerator.save_model(model,eval_dir / ('checkpoint-' +str(epoch)) / "ema")
-                    ema_model.restore(model.parameters())
-            if (accelerator.sync_gradients and ((step+1) % val_iters == 0 or step == len(train_dataloader) - 1)) and step > cfg.train.gradient_accumulation_steps and cfg.val.run:
+
+            if accelerator.is_main_process and (step+1) % save_model_iters == 0 and step > cfg.train.gradient_accumulation_steps and not cfg.debug:
+                os.makedirs(eval_dir, exist_ok=True)    
+                path = eval_dir / ('checkpoint-' +str(epoch) + '-' + str(step))
+                accelerator.save_state(path, safe_serialization=True)
+                ema_model.store(model.parameters())
+                ema_model.copy_to(model.parameters())
+                accelerator.save_model(model,eval_dir / ('checkpoint-' +str(epoch)) / "ema")
+                ema_model.restore(model.parameters())
+
+            if ((step+1) % val_iters == 0 or step == len(train_dataloader) - 1) and step > cfg.train.gradient_accumulation_steps and cfg.val.run:
                 path = eval_dir / ('samples-' + str(epoch) + '-' + str(step) + '.png')
                 if cfg.debug:
                     path = 'debug/debug.png'

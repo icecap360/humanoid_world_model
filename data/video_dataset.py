@@ -236,7 +236,7 @@ def encode_video_batch(cfg, batch, vae):
         past_frames, 
         cfg.conditioning.num_past_frames,
         cfg.conditioning.num_future_frames,
-        cfg.conditioning.num_past_latents + 1,
+        cfg.conditioning.num_past_latents,
         cfg.conditioning.num_future_latents,
         device
     )
@@ -244,7 +244,7 @@ def encode_video_batch(cfg, batch, vae):
         vae, 
         past_frames, 
         future_frames,
-        cfg.conditioning.num_past_latents + 1,
+        cfg.conditioning.num_past_latents,
         cfg.conditioning.num_future_latents,
         device)
     batch['past_latents'] = past_latents.to(orig_dtype)

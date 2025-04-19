@@ -1,6 +1,6 @@
 train:
   batch_size: 64 
-  learning_rate: 8e-5
+  learning_rate: 9e-5
   lr_warmup_steps: 200
   num_epochs: 500
   gradient_accumulation_steps: 4

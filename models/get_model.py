@@ -1,7 +1,7 @@
 from .unet import UNet
 from .dit_imgs import DiTImgModel
 from diffusers import UNet2DModel
-from .dit_video import VideoDiTModel, VideoUViTModel
+from .dit_video import VideoDiTModel, VideoUViTModel, VideoDiTModalitySharingModel, VideoDiTFullSharingModel, VideoDiTSplitAttnModel
 
 def get_model(cfg, latent_channels, input_size, conditioning_manager=None):
     if 'unet' in cfg.model.type:
@@ -53,6 +53,60 @@ def get_model(cfg, latent_channels, input_size, conditioning_manager=None):
     elif cfg.model.type.lower() == 'video_dit':
         dim_spatial=cfg.image_size // cfg.image_tokenizer.spatial_compression
         return VideoDiTModel(
+            latent_channels,
+            cfg.conditioning.num_past_frames,
+            cfg.conditioning.num_future_frames,
+            cfg.conditioning.num_past_latents,
+            cfg.conditioning.num_future_latents,
+            dim_spatial,
+            dim_spatial,
+            cfg.conditioning.dim_act,
+            cfg.model.token_dim,
+            cfg.model.patch_size,
+            cfg.model.num_layers,
+            cfg.model.num_heads,
+            cfg.model.cfg_prob,
+            discrete_time=cfg.use_discrete_time
+        )
+    elif cfg.model.type.lower() == 'video_dit_modality_sharing':
+        dim_spatial=cfg.image_size // cfg.image_tokenizer.spatial_compression
+        return VideoDiTModalitySharingModel(
+            latent_channels,
+            cfg.conditioning.num_past_frames,
+            cfg.conditioning.num_future_frames,
+            cfg.conditioning.num_past_latents,
+            cfg.conditioning.num_future_latents,
+            dim_spatial,
+            dim_spatial,
+            cfg.conditioning.dim_act,
+            cfg.model.token_dim,
+            cfg.model.patch_size,
+            cfg.model.num_layers,
+            cfg.model.num_heads,
+            cfg.model.cfg_prob,
+            discrete_time=cfg.use_discrete_time
+        )
+    elif cfg.model.type.lower() == 'video_dit_full_sharing':
+        dim_spatial=cfg.image_size // cfg.image_tokenizer.spatial_compression
+        return VideoDiTFullSharingModel(
+            latent_channels,
+            cfg.conditioning.num_past_frames,
+            cfg.conditioning.num_future_frames,
+            cfg.conditioning.num_past_latents,
+            cfg.conditioning.num_future_latents,
+            dim_spatial,
+            dim_spatial,
+            cfg.conditioning.dim_act,
+            cfg.model.token_dim,
+            cfg.model.patch_size,
+            cfg.model.num_layers,
+            cfg.model.num_heads,
+            cfg.model.cfg_prob,
+            discrete_time=cfg.use_discrete_time
+        )
+    elif cfg.model.type.lower() == 'video_dit_splitattn':
+        dim_spatial=cfg.image_size // cfg.image_tokenizer.spatial_compression
+        return VideoDiTSplitAttnModel(
             latent_channels,
             cfg.conditioning.num_past_frames,
             cfg.conditioning.num_future_frames,

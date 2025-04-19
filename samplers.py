@@ -104,13 +104,13 @@ class Sampler:
         pred_img = [PIL.Image.fromarray(s) for s in pred_img]
         return pred_img
     
-    def sample_video(self, cfg, train_dataloader, model, batch_idx, vae, accelerator, guidance_scale, dtype=torch.float32, device='cuda'):
-        n_samples = 4        
+    def sample_video(self, cfg, model, vae, accelerator, guidance_scale, n_samples=4, dataloader=None, batch_idx=None, dtype=torch.float32, batch=None, device='cuda', use_progress_bar=True):
         
-        train_dataloader_iter = iter(train_dataloader)
-        batch = next(train_dataloader_iter)
-        for i in range(batch_idx):
-            batch = next(train_dataloader_iter)
+        if batch == None:
+            dataloader_iter = iter(dataloader)
+            batch = next(dataloader_iter)
+            for i in range(batch_idx):
+                batch = next(dataloader_iter)
         latents, batch = encode_batch(cfg, batch, vae, accelerator)
         for key in batch.keys():
             batch[key] = batch[key][:n_samples]
@@ -120,7 +120,8 @@ class Sampler:
 
         self.scheduler.set_timesteps(self.num_inference_steps)
         timesteps = self.scheduler.timesteps.to(device)
-        for t in self.progress_bar(timesteps):
+        progress_bar = self.progress_bar(timesteps) if use_progress_bar else timesteps
+        for t in progress_bar:
             # 1. predict noise model_output
             # model_output = unet(latents, t).sample
             t = t.repeat((batch['noisy_latents'].shape[0],1))
