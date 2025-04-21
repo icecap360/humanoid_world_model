@@ -34,6 +34,8 @@ The dataset used for training was provided by the **1xgpt contest**, and we exte
    pip install -r requirements.txt
    ```
 
+4. Install the cosmos tokenizer from the [repo](https://github.com/NVIDIA/Cosmos-Tokenizer).
+
 ---
 
 ## Usage
