@@ -131,7 +131,16 @@
             "type": "debugpy",
             "request": "launch",
             "program": "calculate_fid.py",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "args": ["debug=True"],
+        },
+        {
+            "name": "profiler",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "profile_model.py",
+            "console": "integratedTerminal",
+            // "args": ["debug=True"],
         },
     ]
 }

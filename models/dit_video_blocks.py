@@ -305,9 +305,303 @@ class MMDiTBlockModalitySharing(MMDiTBlock):
         self.act = nn.GELU()
         self.num_heads = num_heads
         self.qk_norm = False
+
+        self.time_scale_shift_v = AdaLayerNormZero(
+            time_dim, token_dim, param_factor=6, n_context=0
+        )
+        self.time_scale_shift_a = AdaLayerNormZero(
+            time_dim, token_dim, param_factor=6, n_context=0
+        )
+        # notice how elementwise_affine=False because we are using AdaLNZero blocks
+
+        self.attn_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
+
+        self.qkv_fv = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+        self.qkv_fa = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+
+        self.joint_attn = JointAttention(
+            token_dim,
+            num_heads=self.num_heads,
+        )
+
+        self.ff_fv = FeedForward(token_dim, act=self.act)
+        self.skip_context_ff = skip_context_ff
+        if not skip_context_ff:
+            self.ff_fa = FeedForward(token_dim, act=self.act)
+
+        # notice how elementwise_affine=False because we are using AdaLNZero blocks
+        self.ff_norm_fv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_fa = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
+
+        self.initialize_weights()
+
+    def forward(self, fv, pv, fa, pa, timesteps, video_pos_embed, action_pos_embed):
+        """
+        fv - future video
+        pv - past video
+        fa - future actions
+        pa - past actions
+        """
+        _, _, _, h, w = fv.shape
+
+        (
+            fv_pre_attn_gamma,
+            fv_post_attn_gamma,
+            fv_pre_ff_gamma,
+            fv_post_ff_gamma,
+            fv_pre_attn_beta,
+            fv_pre_ff_beta,
+        ) = self.time_scale_shift_v(timesteps)
+
+        pv_pre_attn_gamma = fv_pre_attn_gamma
+        pv_post_attn_gamma = fv_post_attn_gamma
+        pv_pre_ff_gamma = fv_pre_ff_gamma
+        pv_post_ff_gamma = fv_post_ff_gamma
+        pv_pre_attn_beta = fv_pre_attn_beta
+        pv_pre_ff_beta = fv_pre_ff_beta
+
+        (
+            fa_pre_attn_gamma,
+            fa_post_attn_gamma,
+            fa_pre_ff_gamma,
+            fa_post_ff_gamma,
+            fa_pre_attn_beta,
+            fa_pre_ff_beta,
+        ) = self.time_scale_shift_a(timesteps)
+
+        pa_pre_attn_gamma = fa_pre_attn_gamma
+        pa_post_attn_gamma = fa_post_attn_gamma
+        pa_pre_ff_gamma = fa_pre_ff_gamma
+        pa_post_ff_gamma = fa_post_ff_gamma
+        pa_pre_attn_beta = fa_pre_attn_beta
+        pa_pre_ff_beta = fa_pre_ff_beta
+
+        fv = rearrange(fv, "b d t h w -> b (t h w) d")
+        pv = rearrange(pv, "b d t h w -> b (t h w) d")
+
+        fv_res = modulate(self.attn_norm_cv(fv), fv_pre_attn_gamma, fv_pre_attn_beta)
+        pv_res = modulate(self.attn_norm_pv(pv), pv_pre_attn_gamma, pv_pre_attn_beta)
+        fa_res = modulate(self.attn_norm_ca(fa), fa_pre_attn_gamma, fa_pre_attn_beta)
+        pa_res = modulate(self.attn_norm_pa(pa), pa_pre_attn_gamma, pa_pre_attn_beta)
+
+        q_fv, k_fv, v_fv = self.qkv_fv(fv_res)
+        q_pv, k_pv, v_pv = self.qkv_fv(pv_res)
+        q_fa, k_fa, v_fa = self.qkv_fa(fa_res)
+        q_pa, k_pa, v_pa = self.qkv_fa(pa_res)
+
+        q_pv, q_fv = self.pos_embed_pf(q_pv, q_fv, video_pos_embed)
+        k_pv, k_fv = self.pos_embed_pf(k_pv, k_fv, video_pos_embed)
+
+        q_pa, q_fa = self.pos_embed_pf(q_pa, q_fa, action_pos_embed)
+        k_pa, k_fa = self.pos_embed_pf(k_pa, k_fa, action_pos_embed)
+
+        fv_res, pv_res, fa_res, pa_res = self.joint_attn(
+            [
+                (q_fv, k_fv, v_fv),
+                (q_pv, k_pv, v_pv),
+                (q_fa, k_fa, v_fa),
+                (q_pa, k_pa, v_pa),
+            ]
+        )
+
+        fv = fv + gate(fv_res, fv_post_attn_gamma)
+        pv = pv + gate(pv_res, pv_post_attn_gamma)
+        fa = fa + gate(fa_res, fa_post_attn_gamma)
+        pa = pa + gate(pa_res, pa_post_attn_gamma)
+
+        fv_res = modulate(self.ff_norm_fv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
+        fv_res = self.ff_fv(fv_res)
+        fv = fv + gate(fv_res, fv_post_ff_gamma)
+        fv = rearrange(fv, "b (t h w) d -> b d t h w", h=h, w=w)
+
+        if not self.skip_context_ff:
+            pv_res = modulate(self.ff_norm_pv(pv), pv_pre_ff_gamma, pv_pre_ff_beta)
+            fa_res = modulate(self.ff_norm_fa(fa), fa_pre_ff_gamma, fa_pre_ff_beta)
+            pa_res = modulate(self.ff_norm_pa(pa), pa_pre_ff_gamma, pa_pre_ff_beta)
+
+            pv_res = self.ff_fv(pv_res)
+            fa_res = self.ff_fa(fa_res)
+            pa_res = self.ff_fa(pa_res)
+
+            pv = pv + gate(pv_res, pv_post_ff_gamma)
+            fa = fa + gate(fa_res, fa_post_ff_gamma)
+            pa = pa + gate(pa_res, pa_post_ff_gamma)
+
+        pv = rearrange(pv, "b (t h w) d -> b d t h w", h=h, w=w)
+        return fv, pv, fa, pa
+
+    def initialize_weights(self):
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.qkv_fv.apply(_basic_init)
+        self.qkv_fa.apply(_basic_init)
+        if not self.skip_context_ff:
+            self.ff_fv.apply(_basic_init)
+            self.ff_fa.apply(_basic_init)
+
+
+class MMDiTBlockFullSharing(MMDiTBlock):
+    def __init__(self, token_dim, time_dim, num_heads, skip_context_ff=False):
+        nn.Module.__init__(self)
+        self.token_dim = token_dim
+        self.act = nn.GELU()
+        self.num_heads = num_heads
+        self.qk_norm = False
+
+        self.time_scale_shift = AdaLayerNormZero(
+            time_dim, token_dim, param_factor=6, n_context=0
+        )
+        # notice how elementwise_affine=False because we are using AdaLNZero blocks
+
+        self.attn_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.attn_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
+
+        self.qkv_fv = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+
+        self.joint_attn = JointAttention(
+            token_dim,
+            num_heads=self.num_heads,
+        )
+
+        self.ff_fv = FeedForward(token_dim, act=self.act)
+        self.skip_context_ff = skip_context_ff
+
+        # notice how elementwise_affine=False because we are using AdaLNZero blocks
+        self.ff_norm_fv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
+
+        self.initialize_weights()
+
+    def forward(self, fv, pv, fa, pa, timesteps, video_pos_embed, action_pos_embed):
+        """
+        fv - future video
+        pv - past video
+        fa - future actions
+        pa - past actions
+        """
+        _, _, _, h, w = fv.shape
+
+        (
+            fv_pre_attn_gamma,
+            fv_post_attn_gamma,
+            fv_pre_ff_gamma,
+            fv_post_ff_gamma,
+            fv_pre_attn_beta,
+            fv_pre_ff_beta,
+        ) = self.time_scale_shift(timesteps)
+
+        pv_pre_attn_gamma = fv_pre_attn_gamma
+        pv_post_attn_gamma = fv_post_attn_gamma
+        pv_pre_ff_gamma = fv_pre_ff_gamma
+        pv_post_ff_gamma = fv_post_ff_gamma
+        pv_pre_attn_beta = fv_pre_attn_beta
+        pv_pre_ff_beta = fv_pre_ff_beta
+
+        fa_pre_attn_gamma = fv_pre_attn_gamma
+        fa_post_attn_gamma = fv_post_attn_gamma
+        fa_pre_ff_gamma = fv_pre_ff_gamma
+        fa_post_ff_gamma = fv_post_ff_gamma
+        fa_pre_attn_beta = fv_pre_attn_beta
+        fa_pre_ff_beta = fv_pre_ff_beta
+
+        pa_pre_attn_gamma = fa_pre_attn_gamma
+        pa_post_attn_gamma = fa_post_attn_gamma
+        pa_pre_ff_gamma = fa_pre_ff_gamma
+        pa_post_ff_gamma = fa_post_ff_gamma
+        pa_pre_attn_beta = fa_pre_attn_beta
+        pa_pre_ff_beta = fa_pre_ff_beta
+
+        fv = rearrange(fv, "b d t h w -> b (t h w) d")
+        pv = rearrange(pv, "b d t h w -> b (t h w) d")
+
+        fv_res = modulate(self.attn_norm_cv(fv), fv_pre_attn_gamma, fv_pre_attn_beta)
+        pv_res = modulate(self.attn_norm_pv(pv), pv_pre_attn_gamma, pv_pre_attn_beta)
+        fa_res = modulate(self.attn_norm_ca(fa), fa_pre_attn_gamma, fa_pre_attn_beta)
+        pa_res = modulate(self.attn_norm_pa(pa), pa_pre_attn_gamma, pa_pre_attn_beta)
+
+        q_fv, k_fv, v_fv = self.qkv_fv(fv_res)
+        q_pv, k_pv, v_pv = self.qkv_fv(pv_res)
+        q_fa, k_fa, v_fa = self.qkv_fv(fa_res)
+        q_pa, k_pa, v_pa = self.qkv_fv(pa_res)
+
+        q_pv, q_fv = self.pos_embed_pf(q_pv, q_fv, video_pos_embed)
+        k_pv, k_fv = self.pos_embed_pf(k_pv, k_fv, video_pos_embed)
+
+        q_pa, q_fa = self.pos_embed_pf(q_pa, q_fa, action_pos_embed)
+        k_pa, k_fa = self.pos_embed_pf(k_pa, k_fa, action_pos_embed)
+
+        fv_res, pv_res, fa_res, pa_res = self.joint_attn(
+            [
+                (q_fv, k_fv, v_fv),
+                (q_pv, k_pv, v_pv),
+                (q_fa, k_fa, v_fa),
+                (q_pa, k_pa, v_pa),
+            ]
+        )
+
+        fv = fv + gate(fv_res, fv_post_attn_gamma)
+        pv = pv + gate(pv_res, pv_post_attn_gamma)
+        fa = fa + gate(fa_res, fa_post_attn_gamma)
+        pa = pa + gate(pa_res, pa_post_attn_gamma)
+
+        fv_res = modulate(self.ff_norm_fv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
+        fv_res = self.ff_fv(fv_res)
+        fv = fv + gate(fv_res, fv_post_ff_gamma)
+        fv = rearrange(fv, "b (t h w) d -> b d t h w", h=h, w=w)
+
+        if not self.skip_context_ff:
+            pv_res = modulate(self.ff_norm_pv(pv), pv_pre_ff_gamma, pv_pre_ff_beta)
+            fa_res = modulate(self.ff_norm_ca(fa), fa_pre_ff_gamma, fa_pre_ff_beta)
+            pa_res = modulate(self.ff_norm_pa(pa), pa_pre_ff_gamma, pa_pre_ff_beta)
+
+            pv_res = self.ff_fv(pv_res)
+            fa_res = self.ff_fv(fa_res)
+            pa_res = self.ff_fv(pa_res)
+
+            pv = pv + gate(pv_res, pv_post_ff_gamma)
+            fa = fa + gate(fa_res, fa_post_ff_gamma)
+            pa = pa + gate(pa_res, pa_post_ff_gamma)
+
+        pv = rearrange(pv, "b (t h w) d -> b d t h w", h=h, w=w)
+        return fv, pv, fa, pa
+
+    def initialize_weights(self):
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+
+        self.qkv_fv.apply(_basic_init)
+        if not self.skip_context_ff:
+            self.ff_fv.apply(_basic_init)
+
+
+
+class MMDiTSplitAttentionBlock(MMDiTBlock):
+    def __init__(self, token_dim, time_dim, num_heads, skip_context_ff=False):
+        nn.Module.__init__(self)
+        self.token_dim = token_dim
+        self.act = nn.GELU()
+        self.num_heads = num_heads
+        self.qk_norm = True
         
         self.time_scale_shift_v = AdaLayerNormZero(time_dim, token_dim, param_factor=6, n_context=0)
         self.time_scale_shift_a = AdaLayerNormZero(time_dim, token_dim, param_factor=6, n_context=0)
+        self.time_scale_shift_cross = AdaLayerNormZero(time_dim, token_dim, param_factor=3, n_context=0)
         # notice how elementwise_affine=False because we are using AdaLNZero blocks
         
         self.attn_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
@@ -316,30 +610,45 @@ class MMDiTBlockModalitySharing(MMDiTBlock):
         self.attn_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
         
         self.qkv_fv = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.qkv_pv = self.qkv_fv
+        # self.qkv_pv = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
         self.qkv_fa = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.qkv_pa = self.qkv_fa
+        # self.qkv_pa = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
         
-        self.joint_attn = JointAttention(
-            token_dim, 
-            num_heads=self.num_heads,
-        )
+        self.crossattn_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.crossattn_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.crossattn_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.crossattn_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
         
-        self.ff_cv = FeedForward(token_dim, act=self.act)
+        self.q_fv = Q(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+        self.kv_pv = KV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+        self.kv_fa = KV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+        self.kv_pa = KV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
+        
+        self.joint_attns = nn.ModuleList(
+            [JointAttention(
+                token_dim, 
+                num_heads=self.num_heads,
+                ) for _ in range(2)])
+        self.cross_attn = JointAttention(
+                token_dim, 
+                num_heads=self.num_heads,
+                )
+        
+        self.ff_fv = FeedForward(token_dim, act=self.act)
         self.skip_context_ff = skip_context_ff
         if not skip_context_ff:
-            self.ff_pv = self.ff_cv
-            self.ff_ca = FeedForward(token_dim, act=self.act)
-            self.ff_pa = self.ff_ca
+            # self.ff_pv = FeedForward(token_dim, act=self.act)
+            self.ff_fa = FeedForward(token_dim, act=self.act)
+            # self.ff_pa = FeedForward(token_dim, act=self.act)
         
         # notice how elementwise_affine=False because we are using AdaLNZero blocks
-        self.ff_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_fv = nn.LayerNorm(token_dim, elementwise_affine=False)
         self.ff_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.ff_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
+        self.ff_norm_fa = nn.LayerNorm(token_dim, elementwise_affine=False)
         self.ff_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
 
         self.initialize_weights()
-
+    
     def forward(self, fv, pv, fa, pa, timesteps, video_pos_embed, action_pos_embed):
         '''
         fv - future video
@@ -381,286 +690,6 @@ class MMDiTBlockModalitySharing(MMDiTBlock):
         pa_pre_attn_beta = fa_pre_attn_beta
         pa_pre_ff_beta = fa_pre_ff_beta
 
-        fv = rearrange(fv, 'b d t h w -> b (t h w) d')
-        pv = rearrange(pv, 'b d t h w -> b (t h w) d')
-        
-        fv_res = modulate(self.attn_norm_cv(fv), fv_pre_attn_gamma, fv_pre_attn_beta) 
-        pv_res = modulate(self.attn_norm_pv(pv), pv_pre_attn_gamma, pv_pre_attn_beta) 
-        fa_res = modulate(self.attn_norm_ca(fa), fa_pre_attn_gamma, fa_pre_attn_beta) 
-        pa_res = modulate(self.attn_norm_pa(pa), pa_pre_attn_gamma, pa_pre_attn_beta) 
-        
-        q_fv, k_fv, v_fv = self.qkv_fv(fv_res)
-        q_pv, k_pv, v_pv = self.qkv_pv(pv_res)
-        q_fa, k_fa, v_fa = self.qkv_fa(fa_res)
-        q_pa, k_pa, v_pa = self.qkv_pa(pa_res)
-        
-        q_pv, q_fv = self.pos_embed_pf(q_pv, q_fv, video_pos_embed)
-        k_pv, k_fv = self.pos_embed_pf(k_pv, k_fv, video_pos_embed)
-
-        q_pa, q_fa = self.pos_embed_pf(q_pa, q_fa, action_pos_embed)
-        k_pa, k_fa = self.pos_embed_pf(k_pa, k_fa, action_pos_embed)
-
-        fv_res, pv_res, fa_res, pa_res = self.joint_attn([
-            (q_fv, k_fv, v_fv),
-            (q_pv, k_pv, v_pv),
-            (q_fa, k_fa, v_fa),
-            (q_pa, k_pa, v_pa),
-        ])
-        
-        fv = fv + gate(fv_res, fv_post_attn_gamma) 
-        pv = pv + gate(pv_res, pv_post_attn_gamma) 
-        fa = fa + gate(fa_res, fa_post_attn_gamma) 
-        pa = pa + gate(pa_res, pa_post_attn_gamma) 
-
-        fv_res = modulate(self.ff_norm_cv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
-        fv_res = self.ff_cv(fv_res) 
-        fv = fv + gate(fv_res, fv_post_ff_gamma) 
-        fv = rearrange(fv, 'b (t h w) d -> b d t h w', h=h, w=w)
-
-        if not self.skip_context_ff:
-            pv_res = modulate(self.ff_norm_pv(pv), pv_pre_ff_gamma, pv_pre_ff_beta) 
-            fa_res = modulate(self.ff_norm_ca(fa), fa_pre_ff_gamma, fa_pre_ff_beta) 
-            pa_res = modulate(self.ff_norm_pa(pa), pa_pre_ff_gamma, pa_pre_ff_beta) 
-
-            pv_res = self.ff_pv(pv_res) 
-            fa_res = self.ff_ca(fa_res) 
-            pa_res = self.ff_pa(pa_res) 
-        
-            pv = pv + gate(pv_res, pv_post_ff_gamma) 
-            fa = fa + gate(fa_res, fa_post_ff_gamma) 
-            pa = pa + gate(pa_res, pa_post_ff_gamma) 
-        
-        pv = rearrange(pv, 'b (t h w) d -> b d t h w', h=h, w=w)
-        return fv, pv, fa, pa
-    
-class MMDiTBlockFullSharing(MMDiTBlock):
-    def __init__(self, token_dim, time_dim, num_heads, skip_context_ff=False):
-        nn.Module.__init__(self)
-        self.token_dim = token_dim
-        self.act = nn.GELU()
-        self.num_heads = num_heads
-        self.qk_norm = False
-        
-        self.time_scale_shift = AdaLayerNormZero(time_dim, token_dim, param_factor=6, n_context=0)
-        # notice how elementwise_affine=False because we are using AdaLNZero blocks
-        
-        self.attn_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.attn_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.attn_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.attn_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
-        
-        self.qkv_fv = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.qkv_pv = self.qkv_fv
-        self.qkv_fa = self.qkv_fv
-        self.qkv_pa = self.qkv_fv
-        
-        self.joint_attn = JointAttention(
-            token_dim, 
-            num_heads=self.num_heads,
-        )
-        
-        self.ff_cv = FeedForward(token_dim, act=self.act)
-        self.skip_context_ff = skip_context_ff
-        if not skip_context_ff:
-            self.ff_pv = self.ff_cv
-            self.ff_ca = self.ff_cv
-            self.ff_pa = self.ff_cv
-        
-        # notice how elementwise_affine=False because we are using AdaLNZero blocks
-        self.ff_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.ff_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.ff_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.ff_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
-
-        self.initialize_weights()
-
-    def forward(self, fv, pv, fa, pa, timesteps, video_pos_embed, action_pos_embed):
-        '''
-        fv - future video
-        pv - past video
-        fa - future actions 
-        pa - past actions
-        '''
-        _, _, _, h, w = fv.shape
-        
-        (
-            fv_pre_attn_gamma,
-            fv_post_attn_gamma,
-            fv_pre_ff_gamma,
-            fv_post_ff_gamma,
-            fv_pre_attn_beta,
-            fv_pre_ff_beta,
-        ) = self.time_scale_shift(timesteps)
-
-        pv_pre_attn_gamma = fv_pre_attn_gamma
-        pv_post_attn_gamma = fv_post_attn_gamma
-        pv_pre_ff_gamma = fv_pre_ff_gamma
-        pv_post_ff_gamma = fv_post_ff_gamma
-        pv_pre_attn_beta = fv_pre_attn_beta
-        pv_pre_ff_beta = fv_pre_ff_beta
-
-        fa_pre_attn_gamma = fv_pre_attn_gamma
-        fa_post_attn_gamma = fv_post_attn_gamma
-        fa_pre_ff_gamma = fv_pre_ff_gamma
-        fa_post_ff_gamma = fv_post_ff_gamma
-        fa_pre_attn_beta = fv_pre_attn_beta
-        fa_pre_ff_beta = fv_pre_ff_beta
-    
-        pa_pre_attn_gamma = fa_pre_attn_gamma
-        pa_post_attn_gamma = fa_post_attn_gamma
-        pa_pre_ff_gamma = fa_pre_ff_gamma
-        pa_post_ff_gamma = fa_post_ff_gamma
-        pa_pre_attn_beta = fa_pre_attn_beta
-        pa_pre_ff_beta = fa_pre_ff_beta
-
-        fv = rearrange(fv, 'b d t h w -> b (t h w) d')
-        pv = rearrange(pv, 'b d t h w -> b (t h w) d')
-        
-        fv_res = modulate(self.attn_norm_cv(fv), fv_pre_attn_gamma, fv_pre_attn_beta) 
-        pv_res = modulate(self.attn_norm_pv(pv), pv_pre_attn_gamma, pv_pre_attn_beta) 
-        fa_res = modulate(self.attn_norm_ca(fa), fa_pre_attn_gamma, fa_pre_attn_beta) 
-        pa_res = modulate(self.attn_norm_pa(pa), pa_pre_attn_gamma, pa_pre_attn_beta) 
-        
-        q_fv, k_fv, v_fv = self.qkv_fv(fv_res)
-        q_pv, k_pv, v_pv = self.qkv_pv(pv_res)
-        q_fa, k_fa, v_fa = self.qkv_fa(fa_res)
-        q_pa, k_pa, v_pa = self.qkv_pa(pa_res)
-        
-        q_pv, q_fv = self.pos_embed_pf(q_pv, q_fv, video_pos_embed)
-        k_pv, k_fv = self.pos_embed_pf(k_pv, k_fv, video_pos_embed)
-
-        q_pa, q_fa = self.pos_embed_pf(q_pa, q_fa, action_pos_embed)
-        k_pa, k_fa = self.pos_embed_pf(k_pa, k_fa, action_pos_embed)
-
-        fv_res, pv_res, fa_res, pa_res = self.joint_attn([
-            (q_fv, k_fv, v_fv),
-            (q_pv, k_pv, v_pv),
-            (q_fa, k_fa, v_fa),
-            (q_pa, k_pa, v_pa),
-        ])
-        
-        fv = fv + gate(fv_res, fv_post_attn_gamma) 
-        pv = pv + gate(pv_res, pv_post_attn_gamma) 
-        fa = fa + gate(fa_res, fa_post_attn_gamma) 
-        pa = pa + gate(pa_res, pa_post_attn_gamma) 
-
-        fv_res = modulate(self.ff_norm_cv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
-        fv_res = self.ff_cv(fv_res) 
-        fv = fv + gate(fv_res, fv_post_ff_gamma) 
-        fv = rearrange(fv, 'b (t h w) d -> b d t h w', h=h, w=w)
-
-        if not self.skip_context_ff:
-            pv_res = modulate(self.ff_norm_pv(pv), pv_pre_ff_gamma, pv_pre_ff_beta) 
-            fa_res = modulate(self.ff_norm_ca(fa), fa_pre_ff_gamma, fa_pre_ff_beta) 
-            pa_res = modulate(self.ff_norm_pa(pa), pa_pre_ff_gamma, pa_pre_ff_beta) 
-
-            pv_res = self.ff_pv(pv_res) 
-            fa_res = self.ff_ca(fa_res) 
-            pa_res = self.ff_pa(pa_res) 
-        
-            pv = pv + gate(pv_res, pv_post_ff_gamma) 
-            fa = fa + gate(fa_res, fa_post_ff_gamma) 
-            pa = pa + gate(pa_res, pa_post_ff_gamma) 
-        
-        pv = rearrange(pv, 'b (t h w) d -> b d t h w', h=h, w=w)
-        return fv, pv, fa, pa
-
-class MMDiTSplitAttentionBlock(MMDiTBlock):
-    def __init__(self, token_dim, time_dim, num_heads, skip_context_ff=False):
-        nn.Module.__init__(self)
-        self.token_dim = token_dim
-        self.act = nn.GELU()
-        self.num_heads = num_heads
-        self.qk_norm = True
-        
-        self.time_scale_shift = AdaLayerNormZero(time_dim, token_dim, param_factor=6, n_context=3)
-        self.time_scale_shift_cross = AdaLayerNormZero(time_dim, token_dim, param_factor=3, n_context=0)
-        # notice how elementwise_affine=False because we are using AdaLNZero blocks
-        
-        self.attn_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.attn_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.attn_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.attn_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
-        
-        self.qkv_fv = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.qkv_pv = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.qkv_fa = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.qkv_pa = QKV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        
-        self.crossattn_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.crossattn_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.crossattn_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.crossattn_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
-        
-        self.q_fv = Q(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.kv_pv = KV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.kv_fa = KV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        self.kv_pa = KV(token_dim, num_heads=self.num_heads, qk_norm=self.qk_norm)
-        
-        self.joint_attns = nn.ModuleList(
-            [JointAttention(
-                token_dim, 
-                num_heads=self.num_heads,
-                ) for _ in range(4)])
-        self.cross_attn = JointAttention(
-                token_dim, 
-                num_heads=self.num_heads,
-                )
-        
-        self.ff_cv = FeedForward(token_dim, act=self.act)
-        self.skip_context_ff = skip_context_ff
-        if not skip_context_ff:
-            self.ff_pv = FeedForward(token_dim, act=self.act)
-            self.ff_ca = FeedForward(token_dim, act=self.act)
-            self.ff_pa = FeedForward(token_dim, act=self.act)
-        
-        # notice how elementwise_affine=False because we are using AdaLNZero blocks
-        self.ff_norm_cv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.ff_norm_pv = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.ff_norm_ca = nn.LayerNorm(token_dim, elementwise_affine=False)
-        self.ff_norm_pa = nn.LayerNorm(token_dim, elementwise_affine=False)
-
-        self.initialize_weights()
-    
-    def forward(self, fv, pv, fa, pa, timesteps, video_pos_embed, action_pos_embed):
-        '''
-        fv - future video
-        pv - past video
-        fa - future actions 
-        pa - past actions
-        '''
-        _, _, _, h, w = fv.shape
-        
-        (
-            fv_pre_attn_gamma,
-            fv_post_attn_gamma,
-            fv_pre_ff_gamma,
-            fv_post_ff_gamma,
-            fv_pre_attn_beta,
-            fv_pre_ff_beta,
-
-            pv_pre_attn_gamma,
-            pv_post_attn_gamma,
-            pv_pre_ff_gamma,
-            pv_post_ff_gamma,
-            pv_pre_attn_beta,
-            pv_pre_ff_beta,
-            
-            fa_pre_attn_gamma,
-            fa_post_attn_gamma,
-            fa_pre_ff_gamma,
-            fa_post_ff_gamma,
-            fa_pre_attn_beta,
-            fa_pre_ff_beta,
-
-            pa_pre_attn_gamma,
-            pa_post_attn_gamma,
-            pa_pre_ff_gamma,
-            pa_post_ff_gamma,
-            pa_pre_attn_beta,
-            pa_pre_ff_beta
-        ) = self.time_scale_shift(timesteps)
-
         (   fv_pre_crossattn_gamma,
             fv_post_crossattn_gamma,
             fv_pre_crossattn_beta) = self.time_scale_shift_cross(timesteps)
@@ -673,9 +702,9 @@ class MMDiTSplitAttentionBlock(MMDiTBlock):
         pa_res = modulate(self.attn_norm_pa(pa), pa_pre_attn_gamma, pa_pre_attn_beta) 
         
         q_fv, k_fv, v_fv = self.qkv_fv(fv_res)
-        q_pv, k_pv, v_pv = self.qkv_pv(pv_res)
+        q_pv, k_pv, v_pv = self.qkv_fv(pv_res)
         q_fa, k_fa, v_fa = self.qkv_fa(fa_res)
-        q_pa, k_pa, v_pa = self.qkv_pa(pa_res)
+        q_pa, k_pa, v_pa = self.qkv_fa(pa_res)
         
         q_pv, q_fv = self.pos_embed_pf(q_pv, q_fv, video_pos_embed)
         k_pv, k_fv = self.pos_embed_pf(k_pv, k_fv, video_pos_embed)
@@ -684,9 +713,9 @@ class MMDiTSplitAttentionBlock(MMDiTBlock):
         k_pa, k_fa = self.pos_embed_pf(k_pa, k_fa, action_pos_embed)
 
         fv_res = self.joint_attns[0]([(q_fv, k_fv, v_fv)])[0]
-        pv_res = self.joint_attns[1]([(q_pv, k_pv, v_pv)])[0]
-        fa_res = self.joint_attns[2]([(q_fa, k_fa, v_fa)])[0]
-        pa_res = self.joint_attns[3]([(q_pa, k_pa, v_pa)])[0]
+        pv_res = self.joint_attns[0]([(q_pv, k_pv, v_pv)])[0]
+        fa_res = self.joint_attns[1]([(q_fa, k_fa, v_fa)])[0]
+        pa_res = self.joint_attns[1]([(q_pa, k_pa, v_pa)])[0]
         
         fv = fv + gate(fv_res, fv_post_attn_gamma) 
         pv = pv + gate(pv_res, pv_post_attn_gamma) 
@@ -715,19 +744,19 @@ class MMDiTSplitAttentionBlock(MMDiTBlock):
         fv = fv + gate(fv_res, fv_post_crossattn_gamma) 
         #####
 
-        fv_res = modulate(self.ff_norm_cv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
-        fv_res = self.ff_cv(fv_res) 
+        fv_res = modulate(self.ff_norm_fv(fv), fv_pre_ff_gamma, fv_pre_ff_beta)
+        fv_res = self.ff_fv(fv_res) 
         fv = fv + gate(fv_res, fv_post_ff_gamma) 
         fv = rearrange(fv, 'b (t h w) d -> b d t h w', h=h, w=w)
 
         if not self.skip_context_ff:
             pv_res = modulate(self.ff_norm_pv(pv), pv_pre_ff_gamma, pv_pre_ff_beta) 
-            fa_res = modulate(self.ff_norm_ca(fa), fa_pre_ff_gamma, fa_pre_ff_beta) 
+            fa_res = modulate(self.ff_norm_fa(fa), fa_pre_ff_gamma, fa_pre_ff_beta) 
             pa_res = modulate(self.ff_norm_pa(pa), pa_pre_ff_gamma, pa_pre_ff_beta) 
 
-            pv_res = self.ff_pv(pv_res) 
-            fa_res = self.ff_ca(fa_res) 
-            pa_res = self.ff_pa(pa_res) 
+            pv_res = self.ff_fv(pv_res) 
+            fa_res = self.ff_fa(fa_res) 
+            pa_res = self.ff_fa(pa_res) 
         
             pv = pv + gate(pv_res, pv_post_ff_gamma) 
             fa = fa + gate(fa_res, fa_post_ff_gamma) 
@@ -736,6 +765,21 @@ class MMDiTSplitAttentionBlock(MMDiTBlock):
         pv = rearrange(pv, 'b (t h w) d -> b d t h w', h=h, w=w)
         return fv, pv, fa, pa
 
+    def initialize_weights(self):
+        def _basic_init(module):
+            if isinstance(module, nn.Linear):
+                torch.nn.init.xavier_uniform_(module.weight)
+                if module.bias is not None:
+                    nn.init.constant_(module.bias, 0)
+        self.qkv_fv.apply(_basic_init)
+        # self.qkv_pv.apply(_basic_init)
+        self.qkv_fa.apply(_basic_init)
+        # self.qkv_pa.apply(_basic_init)
+        if not self.skip_context_ff:
+            self.ff_fv.apply(_basic_init)
+            # self.ff_pv.apply(_basic_init)
+            self.ff_fa.apply(_basic_init)
+            # self.ff_pa.apply(_basic_init)
 
 class FinalLayer(nn.Module):
     """

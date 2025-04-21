@@ -347,7 +347,7 @@ def main(cfg):
                         if 'video' in cfg.gen_type.lower():
                             sample_videos, sample_grids = sampler.sample_video(
                                 cfg,
-                                train_dataloader,
+                                dataloader=train_dataloader,
                                 batch_idx=75,
                                 vae=vae_model, 
                                 accelerator=accelerator,

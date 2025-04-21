@@ -6,12 +6,12 @@ train:
   gradient_accumulation_steps: 3
   val_iters: 4000 # 2000
   save_model_iters: 2000 # 2000
-  resume_train: false
-  resume_model: "/pub0/qasim/1xgpt/humanoid_world_model/logs/BaseRun -  April-17-20-10/checkpoint-0-55999"
+  resume_train: true
+  resume_model: "/pub0/qasim/1xgpt/humanoid_world_model/logs/Full Sharing (rerun) - April-20-02-03/checkpoint-0-17999"
 
 val:
   run: true
-  batch_size: 16
+  batch_size: 14
   skip_val_loss: False
   skip_img_sample: False
   output_dir: "/pub0/qasim/1xgpt/humanoid_world_model/logs"
@@ -28,7 +28,7 @@ gen_type: 'video'
 use_discrete_time: False
 
 model:
-  type: 'video_dit'
+  type: 'video_dit_full_sharing'
   unet_blocks: [256, 512, 768, 1024, 1536]
   unet_attention_resolutions: [32, 16, 8, 4]
   noise_steps:  50

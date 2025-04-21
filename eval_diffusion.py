@@ -1,149 +1,215 @@
 import os
-from argparse import ArgumentParser, Namespace
-import sys
-from typing import Any
 from pathlib import Path
-import data
-import torch 
-import matplotlib.pyplot as plt
+import torch
 import numpy as np
-from loguru import logger as logging
-from cosmos_tokenizer.networks import TokenizerConfigs
-from torch.utils.data import DataLoader
-import torchvision.transforms as transforms
-from einops import rearrange
-import cv2
-import wandb
-from configs import BaseConfig
-from cosmos_tokenizer.image_lib import ImageTokenizer
-from cosmos_tokenizer.utils import (
-    numpy2tensor
-)
+import matplotlib.pyplot as plt
 import tqdm
+import hydra
 import datetime
-from diffusers import UNet2DModel, DDPMScheduler
-from diffusers.optimization import get_cosine_schedule_with_warmup
-from diffusers import DDPMPipeline
-from diffusers.utils import make_image_grid
-from accelerate import Accelerator
-import torch.nn.functional as F
 import shutil
+import cv2
+import torch.nn.functional as F
+
+# Remove unused imports from training (e.g. wandb, optimizer, backprop)
+from loguru import logger
+from cosmos_tokenizer.networks import TokenizerConfigs
+from cosmos_tokenizer.image_lib import ImageTokenizer
+from cosmos_tokenizer.video_lib import CausalVideoTokenizer
+from data import get_dataloaders, encode_batch
+from conditioning import ConditioningManager
+from models import get_model
+import samplers
+from diffusers.utils import make_image_grid
+from accelerate import Accelerator, InitProcessGroupKwargs
 from accelerate.utils import set_seed
+from schedulers import get_scheduler
 
-torch.manual_seed(0) 
-np.random.seed(0)
-_UINT8_MAX_F = float(torch.iinfo(torch.uint8).max)
+def compute_val_loss(cfg, model, val_dataloader, vae_model, noise_scheduler, accelerator, progress_bar_enabled=True):
+    model.eval()
+    total_loss = 0.0
+    total_samples = 0
+    n_timesteps = cfg.model.noise_steps
 
-config = BaseConfig()
+    if accelerator.is_main_process and progress_bar_enabled:
+        pbar = tqdm.tqdm(total=len(val_dataloader), desc="Validating")
+    else:
+        pbar = None
 
-tokenizer_config = TokenizerConfigs[config.tokenizer_type].value
-tokenizer_config.update(dict(spatial_compression=config.spatial_compression))
-if "I" in config.tokenizer_type:
-    model_name = f"Cosmos-Tokenizer-{config.tokenizer_type}{config.spatial_compression}x{config.spatial_compression}"
-else:
-    model_name = f"Cosmos-Tokenizer-{config.tokenizer_type}{config.spatial_compression}x{config.spatial_compression}x{config.spatial_compression}"
+    for step, batch in enumerate(val_dataloader):
+        # Encode the batch into latents
+        latents, batch = encode_batch(cfg, batch, vae_model, accelerator)
+        bs = latents.shape[0]
+        noise = torch.randn(latents.shape, device=accelerator.device)
+        timesteps = torch.randint(
+            0, n_timesteps, (bs, 1), device=accelerator.device, dtype=torch.int64
+        )
+        # Add noise to the latents using the noise scheduler
+        batch['noisy_latents'] = noise_scheduler.add_noise(latents, noise, timesteps)
 
-def get_dataloader_kwargs():
-    """Get kwargs for DataLoader in distributed setting"""
-    return {
-        'pin_memory': True,
-        'num_workers': 4,  # Increased from 0
-        'prefetch_factor': 2,  # Added prefetch
-        'persistent_workers': True,  # Keep workers alive between epochs
-    }
+        with torch.no_grad():
+            noise_pred = model(batch, timesteps, accelerator.device, use_cfg=True)
+            loss = F.mse_loss(noise_pred, noise, reduction="mean")
+        total_loss += loss.item() * bs
+        total_samples += bs
 
-val_dataset = data.RawImageDataset(config.wmhmwm_val_dir)
-val_dataloader = DataLoader(val_dataset, batch_size=config.eval_batch_size, shuffle=True, **get_dataloader_kwargs()) #  pin_memory=True, num_workers=0, prefetch_factor=None
+        if pbar is not None:
+            pbar.update(1)
+            pbar.set_postfix(loss=loss.item())
 
-noise_scheduler = DDPMScheduler(num_train_timesteps=config.noise_steps)
-model = UNet2DModel(
-    sample_size=config.image_size,  # the target image resolution
-    in_channels=3,  # the number of input channels, 3 for RGB images
-    out_channels=3,  # the number of output channels
-    layers_per_block=2,  # how many ResNet layers to use per UNet block
-    block_out_channels=(64, 64, 128, 128, 256, 256),  # (128, 128, 256, 256, 512, 512) # the number of output channels for each UNet block
-    down_block_types=(
-        "DownBlock2D",  # a regular ResNet downsampling block
-        "DownBlock2D",
-        "DownBlock2D",
-        "DownBlock2D",
-        "AttnDownBlock2D",  # a ResNet downsampling block with spatial self-attention
-        "DownBlock2D",
-    ),
-    up_block_types=(
-        "UpBlock2D",  # a regular ResNet upsampling block
-        "AttnUpBlock2D",  # a ResNet upsampling block with spatial self-attention
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-        "UpBlock2D",
-    ),
-)
+    # Gather metrics across processes
+    total_loss_tensor, total_samples_tensor = accelerator.gather_for_metrics(
+        (torch.tensor(total_loss, device=accelerator.device),
+         torch.tensor(total_samples, device=accelerator.device))
+    )
+    avg_loss = total_loss_tensor.sum() / total_samples_tensor.sum()
+    return avg_loss.item()
 
-vae = ImageTokenizer(
-        checkpoint=Path(config.pretrained_models) / model_name / "autoencoder.jit",
-        checkpoint_enc=Path(config.pretrained_models) / model_name / "encoder.jit",
-        checkpoint_dec=Path(config.pretrained_models) / model_name / "decoder.jit",
-        tokenizer_config=tokenizer_config,
-        device=None,
-        dtype=config.dtype,
+@hydra.main(config_path="configs", config_name="flow_video_mmdit", version_base=None)
+def main(cfg):
+    # Set seeds for reproducibility
+    torch.manual_seed(0)
+    np.random.seed(0)
+    set_seed(cfg.seed)
+    logger.info(f'Configuration: {cfg}')
+
+    # Setup accelerator (for distributed evaluation if needed)
+    accelerator = Accelerator()
+
+    # Setup the VAE from cosmos_tokenizer
+    tokenizer_config = TokenizerConfigs[cfg.image_tokenizer.tokenizer_type].value
+    tokenizer_config.update(dict(spatial_compression=cfg.image_tokenizer.spatial_compression))
+    logger.disable('cosmos_tokenizer')
+
+    if "I" in cfg.image_tokenizer.tokenizer_type:
+        model_name = f"Cosmos-Tokenizer-{cfg.image_tokenizer.tokenizer_type}{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
+        vae = ImageTokenizer(
+            checkpoint=Path(cfg.image_tokenizer.path) / model_name / "autoencoder.jit",
+            checkpoint_enc=Path(cfg.image_tokenizer.path) / model_name / "encoder.jit",
+            checkpoint_dec=Path(cfg.image_tokenizer.path) / model_name / "decoder.jit",
+            tokenizer_config=tokenizer_config,
+            device=None,
+            dtype=cfg.image_tokenizer.dtype,
+        )
+    else:
+        model_name = f"Cosmos-Tokenizer-{cfg.image_tokenizer.tokenizer_type}{cfg.image_tokenizer.temporal_compression}x{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
+        vae = CausalVideoTokenizer(
+            checkpoint=Path(cfg.image_tokenizer.path) / model_name / "autoencoder.jit",
+            checkpoint_enc=Path(cfg.image_tokenizer.path) / model_name / "encoder.jit",
+            checkpoint_dec=Path(cfg.image_tokenizer.path) / model_name / "decoder.jit",
+            tokenizer_config=tokenizer_config,
+            device=None,
+            dtype="bfloat16",
+        )
+
+    # Freeze VAE parameters
+    for param in vae.parameters():
+        param.requires_grad = False
+
+    conditioning_manager = ConditioningManager(cfg.conditioning)
+
+    # Get dataloaders (we only need the validation dataloader)
+    train_dataloader, val_dataloader = get_dataloaders(
+        cfg.data.type,
+        cfg,
+        vae=vae.module if hasattr(vae, "module") else vae,
+        hmwm_train_dir=cfg.data.hmwm_train_dir,
+        hmwm_val_dir=cfg.data.hmwm_val_dir,
+        coco_train_imgs=cfg.data.coco_train_imgs,
+        coco_val_imgs=cfg.data.coco_val_imgs,
+        coco_train_ann=cfg.data.coco_train_ann,
+        coco_val_ann=cfg.data.coco_val_ann,
+        image_size=cfg.image_size,
+        train_batch_size=cfg.train.batch_size,
+        val_batch_size=cfg.val.batch_size,
+        conditioning_type=cfg.conditioning.type,
+        conditioning_manager=conditioning_manager,
+        num_past_frames=cfg.conditioning.get('num_past_frames') + cfg.conditioning.get('num_future_frames'),
+        num_future_frames=cfg.conditioning.get('num_future_frames'),
     )
 
-def transform(batch, accelerator):
-    input_imgs = batch
-    input_imgs = rearrange(input_imgs, 'b h w c -> b c h w')
-    input_imgs = input_imgs.to(accelerator.device).to(torch.bfloat16)
-    input_imgs = input_imgs/_UINT8_MAX_F * 2.0 - 1.0
-    return {"imgs": input_imgs}
+    noise_scheduler = get_scheduler(cfg.model.scheduler_type, cfg.model.noise_steps)
+    latent_channels = tokenizer_config["latent_channels"]
 
-def decode_img(preds):
-    output_imgs = (preds.float() + 1.0) / 2.0
-    output_imgs = rearrange(output_imgs, 'b c h w -> b h w c')
-    output_imgs = output_imgs.clamp(0, 1).cpu().numpy()
-    output_imgs = output_imgs * _UINT8_MAX_F + 0.5
-    output_imgs = output_imgs.astype(np.uint8)
-    return output_imgs
+    # Load the model
+    model = get_model(cfg, latent_channels, conditioning_manager, cfg.image_size // cfg.image_tokenizer.spatial_compression)
 
-def sample_imgs(eval_dir, pipeline):
-    # Sample some images from random noise (this is the backward diffusion process).
-    # The default pipeline output type is `List[PIL.Image]`
-    images = pipeline(
-        batch_size=16,
-        generator=torch.Generator(device='cpu').manual_seed(config.seed), # Use a separate torch generator to avoid rewinding the random state of the main training loop
-    ).images
-    # Make a grid out of the images
-    image_grid = make_image_grid(images, rows=4, cols=4)
-    # Save the images
-    test_dir = os.path.join(eval_dir)
-    os.makedirs(test_dir, exist_ok=True)
-    save_path = f"{test_dir}/sample_imgs.png"
-    image_grid.save(save_path)
+    # Prepare model, vae and dataloader for accelerator
+    model, vae, val_dataloader = accelerator.prepare(model, vae, val_dataloader)
+    conditioning_manager.to(accelerator.device)
 
+    accelerator.load_state(cfg.train.resume_model)
 
-device = config.eval_device
-accelerator = Accelerator()
-model, val_dataloader = accelerator.prepare(
-        model,  val_dataloader
-    )
-accelerator.load_state(config.resume_model)
-# model.load_state_dict(torch.load(config.resume_model))
-# model.eval()
-# model.to(device)
-pipeline = DDPMPipeline(unet=model, scheduler=noise_scheduler)
-path = Path(config.eval_dir)
-sample_imgs( path, pipeline)
+    # Compute and print the validation loss
+    vae_model = vae.module if hasattr(vae, "module") else vae
+    # val_loss = compute_val_loss(cfg, model, val_dataloader, vae_model, noise_scheduler, accelerator)
+    # if accelerator.is_main_process:
+    #     print(f"Validation loss: {val_loss:.6f}")
 
+    # Save image samples to directory "eval_diffusion"
+    sampler = samplers.Sampler(vae, noise_scheduler, cfg.seed, cfg.image_tokenizer.spatial_compression, latent_channels, cfg.model.noise_steps)
+    eval_dir = Path("eval_diffusion")
+    os.makedirs(eval_dir, exist_ok=True)
 
-# for i,batch in enumerate(val_dataloader):
-#     transformed_batch = transform(batch)
-#     input_imgs = transformed_batch["imgs"]
+    model.eval()
+    with torch.no_grad():
+        # Branch based on generation type; adjust as needed.
+        if 'video' in cfg.gen_type.lower():
+            sample_videos, sample_grids = sampler.sample_video_autoregressive(
+                cfg,
+                train_dataloader,
+                batch_idx=0,
+                vae=vae_model,
+                accelerator=accelerator,
+                model=model,
+                guidance_scale=cfg.model.cfg_scale,
+                dtype=torch.float32,
+                device=accelerator.device
+            )
+            os.makedirs(eval_dir, exist_ok=True)
+            b = len(sample_videos)
+            h, w = sample_videos[0][0].size
+            for i in range(b):
+                path_vid = os.path.join(eval_dir, f'output-{i}.mp4')
+                out = cv2.VideoWriter(path_vid, cv2.VideoWriter_fourcc(*'mp4v'), 0.05, (w, h))
+                for frame in sample_videos[i]:
+                    out.write(np.asarray(frame))
+                out.release()
+                path_img0 = os.path.join(eval_dir, f'tokenizedprompt+predictions.jpeg')
+                sample_grids[0][i].save(path_img0)
+                
+                path_img1 = os.path.join(eval_dir, f'gtprompt+predictions.jpeg')
+                sample_grids[1][i].save(path_img1)
+                
+                path_img2 = os.path.join(eval_dir, f'gt_vs_predictions.jpeg')
+                sample_grids[2][i].save(path_img2)
+            print(f"Saved video sample to: {path_vid}")
+        elif cfg.conditioning.type == 'text':
+            samples = sampler.sample_textcond_img(
+                model=model,
+                img_size=cfg.image_size,
+                in_channels=latent_channels,
+                prompt_file=cfg.conditioning.prompt_file,
+                text_tokenizer=conditioning_manager.get_module()['text'],
+                device=accelerator.device,
+                dtype=torch.float32,
+                guidance_scale=cfg.model.cfg_scale
+            )
+            image_grid = make_image_grid(samples, rows=4, cols=4)
+            samples_path = os.path.join(eval_dir, 'samples.png')
+            image_grid.save(samples_path)
+            print(f"Saved image samples to: {samples_path}")
+        else:
+            samples = sampler.sample_uncond_img(
+                unet=model,
+                img_size=cfg.image_size,
+                in_channels=latent_channels,
+                device=accelerator.device,
+                dtype=torch.float32
+            )
+            image_grid = make_image_grid(samples, rows=4, cols=4)
+            samples_path = os.path.join(eval_dir, 'samples.png')
+            image_grid.save(samples_path)
+            print(f"Saved image samples to: {samples_path}")
 
-#     reconstructed = vae.autoencode(input_imgs)
-#     output_imgs = decode_img(reconstructed)
-
-#     plt.imsave('debug/debug_reconstructed.png', output_imgs[0])
-#     psnrs = []
-#     for i in range(input_imgs.shape[0]):
-#         psnrs.append(cv2.PSNR(batch[i].numpy(),output_imgs[i]))
-#     print('Upper bound PSNR', np.mean(psnrs).item(), np.std(psnrs).item())
-#     break
+if __name__ == '__main__':
+    main()
