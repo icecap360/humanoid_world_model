@@ -28,6 +28,7 @@ class VideoDiTModel(Model):
                 add_temp_mask = False,
         ):
         super().__init__()
+        self.dim_Cf = 4
         self.n_layers = n_layers
         self.n_head = n_head
         self.patch_lw = patch_lw
@@ -78,7 +79,7 @@ class VideoDiTModel(Model):
                 nn.Linear(self.dim_hidden * 4, self.dim_hidden)
             )
             self.patcher_f = PatchVideo(
-                    dim_c=self.dim_C,
+                    dim_c=self.dim_Cf,
                     dim_t=self.dim_Lf,
                     dim_h=self.dim_H,
                     dim_w=self.dim_W,
@@ -116,7 +117,7 @@ class VideoDiTModel(Model):
                     skip_context_ff = True
                 )
             else:
-                block = MMDiTBlockHyperConnections(
+                block = MMDiTBlock(
                     self.dim_hidden,
                     self.dim_hidden,
                     num_heads=self.n_head,
@@ -126,7 +127,7 @@ class VideoDiTModel(Model):
             self.dim_hidden,
             patch_lw=self.patch_lw,
             patch_t=self.patch_t,
-            out_channels=self.dim_C
+            out_channels=self.dim_Cf
         )
 
         self.register_buffer('empty_past_frames_emb', torch.zeros((self.dim_C, self.dim_Lp, self.dim_H, self.dim_W)))
@@ -147,7 +148,7 @@ class VideoDiTModel(Model):
         """ USING TORCH.CONTEXT
         Drops labels to enable classifier-free guidance.
         """
-        b, c, tp, h, w = batch['noisy_latents'].shape
+        b = batch['noisy_latents'].shape[0]
         if force_drop_context == False and use_cfg:
             drop_ids = torch.rand(b, device=device) < self.cfg_prob
             batch['past_latents'][drop_ids, :] = self.empty_past_frames_emb.to(device)
@@ -162,7 +163,7 @@ class VideoDiTModel(Model):
             # batch['future_actions'] = self.empty_future_actions_emb.repeat(b,tf,1).to(device)
             batch['past_latents'] = self.empty_past_frames_emb.repeat(b,1,1,1,1).to(device)
             batch['past_actions'] = self.empty_past_actions_emb.repeat(b,1,1).to(device)
-            b, _, tf, _, _ = batch['noisy_latents'].shape
+            b = batch['noisy_latents'].shape[0]
             batch['future_actions'] = self.empty_future_actions_emb.repeat(b,1,1).to(device)
         return batch
     
@@ -217,8 +218,11 @@ class VideoDiTModel(Model):
         nn.init.normal_(self.time_embedder[3].weight, std=0.02)
 
         # Zero-out output layers:
-        nn.init.constant_(self.final_layer.linear.weight, 0)
-        nn.init.constant_(self.final_layer.linear.bias, 0)
+        # nn.init.xavier_uniform_(self.final_layer.linear.weight, gain=.5)
+        # nn.init.xavier_uniform_(self.final_layer.linear.bias)
+        # nn.init.constant_(self.final_layer.linear.weight, 0)
+        # nn.init.normal_(self.final_layer.linear.weight, 0.0, 0.02)
+        # nn.init.constant_(self.final_layer.linear.bias, 0)
 
 
 class VideoDiTModalitySharingModel(VideoDiTModel):

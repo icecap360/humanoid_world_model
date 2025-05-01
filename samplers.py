@@ -105,7 +105,6 @@ class Sampler:
         return pred_img
     
     def sample_video(self, cfg, model, vae, accelerator, guidance_scale, n_samples=4, dataloader=None, batch_idx=None, dtype=torch.float32, batch=None, device='cuda', use_progress_bar=True):
-        
         if batch == None:
             dataloader_iter = iter(dataloader)
             batch = next(dataloader_iter)
@@ -149,7 +148,38 @@ class Sampler:
             img_grid_fullvideo_tokenizedprompt.append( make_image_grid(gt_input_frames[i] + pred_output_frames[i], rows=1, cols=len(all_pred_video[i])) )
             img_grid_generated.append( make_image_grid(pred_output_frames[i] + gt_output_frames[i], 2, cfg.conditioning.num_future_frames) )
         return all_pred_video, (img_grid_fullvideo, img_grid_fullvideo_tokenizedprompt, img_grid_generated)
+    
+    def sample_future_frame(self, cfg, model, img_vae, vid_vae, accelerator, guidance_scale, n_samples=16, dataloader=None, batch_idx=None, dtype=torch.float32, batch=None, device='cuda', use_progress_bar=True):
+        if batch == None:
+            dataloader_iter = iter(dataloader)
+            batch = next(dataloader_iter)
+            for i in range(batch_idx):
+                batch = next(dataloader_iter)
+        latents, batch = encode_batch(cfg, batch, accelerator, img_vae=img_vae, vid_vae=vid_vae)
+        for key in batch.keys():
+            batch[key] = batch[key][:n_samples]
+        generator=torch.Generator(device=device).manual_seed(self.seed)
+        latents = torch.randn(batch['future_latents'].shape, dtype=dtype, device=device, generator=generator)
+        batch['noisy_latents'] = latents
 
+        self.scheduler.set_timesteps(self.num_inference_steps)
+        timesteps = self.scheduler.timesteps.to(device)
+        progress_bar = self.progress_bar(timesteps) if use_progress_bar else timesteps
+        for t in progress_bar:
+            # 1. predict noise model_output
+            # model_output = unet(latents, t).sample
+            t = t.repeat((batch['noisy_latents'].shape[0],1))
+            pred_cond = model(batch, t, device, use_cfg=False)
+            pred_uncond = model(batch, t, device, use_cfg=False, force_drop_context=True)
+            pred = pred_uncond + guidance_scale * (pred_cond - pred_uncond)
+            # 2. compute previous image: x_t -> x_t-1
+            latents = self.scheduler.step(pred, t, latents, generator=generator).prev_sample
+        img_vae = img_vae.module if hasattr(img_vae, "module") else img_vae
+        latents = latents.squeeze(2)
+        pred_img = img_vae.decode(latents.to(torch.bfloat16))
+        pred_img = denormalize_img(pred_img.squeeze(2))
+        pred_img = [PIL.Image.fromarray(s) for s in pred_img]
+        return pred_img
 
     def sample_video_autoregressive(self, cfg, train_dataloader, model, batch_idx, vae, accelerator, guidance_scale, dtype=torch.float32, device='cuda'):
         n_samples = 4        

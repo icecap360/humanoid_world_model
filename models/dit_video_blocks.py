@@ -29,13 +29,16 @@ class PatchVideo(nn.Module):
         self.dim_w = dim_w
         self.dim_hidden = dim_hidden
         block_size = (self.patch_t, self.patch_s, self.patch_s)
-        self.proj = nn.Conv3d(dim_c,
+        self.proj = nn.Sequential(
+            # nn.GroupNorm(8, 16),
+            # nn.GELU(),
+            nn.Conv3d(dim_c,
                               dim_hidden, 
                               kernel_size=block_size,
-                              stride=block_size)
+                              stride=block_size),
+            )
 
     def forward(self, x):
-        b, c, t, h, w = x.shape
         x = self.proj(x)
         return x
     def unpatchify(self, x):
@@ -67,7 +70,6 @@ class PatchVideo(nn.Module):
         return imgs
 
 def interleave_masks_2d(x, binary_vector):
-    b, c, t, h, w = x.shape
     binary_vector = binary_vector.to(torch.int32)
     binary_mask = torch.zeros((b, t, h, w), device=x.device, dtype=x.dtype)
     binary_mask[torch.where(binary_vector)] = 1.0
@@ -115,7 +117,6 @@ class PatchVideoTempMask(PatchVideo):
                               kernel_size=block_size,
                               stride=block_size)
     def forward(self, x):
-        b, c, t, h, w = x.shape
         x = self.proj(x)
         return x
     
@@ -192,7 +193,7 @@ class MMDiTBlock(nn.Module):
         fa - future actions 
         pa - past actions
         '''
-        _, _, _, h, w = fv.shape
+        h, w = fv.shape[-2], fv.shape[-1]
         
         (
             fv_pre_attn_gamma,
@@ -347,7 +348,7 @@ class MMDiTBlockModalitySharing(MMDiTBlock):
         fa - future actions
         pa - past actions
         """
-        _, _, _, h, w = fv.shape
+        h, w = fv.shape[-2], fv.shape[-1]
 
         (
             fv_pre_attn_gamma,
@@ -492,7 +493,7 @@ class MMDiTBlockFullSharing(MMDiTBlock):
         fa - future actions
         pa - past actions
         """
-        _, _, _, h, w = fv.shape
+        h, w = fv.shape[-2], fv.shape[-1]
 
         (
             fv_pre_attn_gamma,
@@ -656,7 +657,7 @@ class MMDiTSplitAttentionBlock(MMDiTBlock):
         fa - future actions 
         pa - past actions
         '''
-        _, _, _, h, w = fv.shape
+        h, w = fv.shape[-2], fv.shape[-1]
         
         (
             fv_pre_attn_gamma,
@@ -790,7 +791,7 @@ class FinalLayer(nn.Module):
         super().__init__()
         self.norm_final = nn.LayerNorm(hidden_size, elementwise_affine=False, eps=1e-6)
         self.adaLN_modulation = AdaLayerNormZero(hidden_size, hidden_size, 2.0) # nn.Sequential( nn.SiLU(), nn.Linear(hidden_size, 2 * hidden_size, bias=True))
-        self.linear = nn.Linear(hidden_size, patch_lw * patch_lw * patch_t * out_channels, bias=True)
+        self.linear = nn.Linear(hidden_size, patch_lw * patch_lw * patch_t * out_channels, bias=False)
     def forward(self, x, timesteps):
         b, d, t, h, w = x.shape
         x = rearrange(x, 'b d t h w -> b (t h w) d', 
@@ -854,7 +855,7 @@ class MMDiTBlockHyperConnections(MMDiTBlock):
         fa - future actions 
         pa - past actions
         '''
-        _, _, _, h, w = fv.shape
+        h, w = fv.shape[-2], fv.shape[-1]
         
         # Obtain time-dependent scaling parameters
         (
@@ -1022,7 +1023,7 @@ class MMDiTBlockHyperConnections(MMDiTBlock):
 #         fa - future actions 
 #         pa - past actions
 #         '''
-#         _, _, _, h, w = fv.shape
+#         h, w = fv.shape[-2], fv.shape[-1]
         
 #         (
 #             fv_pre_attn_gamma,

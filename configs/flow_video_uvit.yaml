@@ -15,7 +15,7 @@ val:
   skip_val_loss: False
   skip_img_sample: False
 
-image_size: 192
+image_size: 256
 debug: False
 one_sample: False
 seed: 0
