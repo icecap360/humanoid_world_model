@@ -175,7 +175,7 @@ class Sampler:
             # 2. compute previous image: x_t -> x_t-1
             latents = self.scheduler.step(pred, t, latents, generator=generator).prev_sample
         img_vae = img_vae.module if hasattr(img_vae, "module") else img_vae
-        latents = latents.squeeze(2)
+        # latents = latents.squeeze(2)
         pred_img = img_vae.decode(latents.to(torch.bfloat16))
         pred_img = denormalize_img(pred_img.squeeze(2))
         pred_img = [PIL.Image.fromarray(s) for s in pred_img]

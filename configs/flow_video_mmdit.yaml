@@ -1,9 +1,9 @@
 train:
-  batch_size: 16 
+  batch_size: 4 
   learning_rate: 1e-4
   lr_warmup_steps: 0
   num_epochs: 500
-  gradient_accumulation_steps: 3
+  gradient_accumulation_steps: 12
   val_iters: 1000 # 2000
   save_model_iters: 2000 # 2000
   resume_train: false
@@ -18,7 +18,7 @@ val:
 
 image_size: 128
 debug: False
-one_sample: True
+one_sample: False
 seed: 0
 log_dir: "/pub0/qasim/1xgpt/humanoid_world_model/logs"
 exp_prefix: "VideoDiT"
@@ -40,7 +40,7 @@ model:
   ema_max_decay: 0.999
   token_dim: 1152
   num_heads: 16
-  num_layers: 15
+  num_layers: 17
   patch_size: 2
 
 data:

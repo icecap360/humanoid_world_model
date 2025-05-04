@@ -68,6 +68,18 @@
             }
         },
         {
+            "name": "train future frame",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "train_futureframe.py",
+            "console": "integratedTerminal",
+            "args": ["debug=True"],
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2"
+            }
+        },
+        {
             "name": "train (distributed + debug)",
             "type": "python",
             "request": "launch",

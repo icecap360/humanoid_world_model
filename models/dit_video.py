@@ -1,6 +1,6 @@
 import torch.nn as nn
 import torch 
-from .common_blocks import SinusoidalPosEmb, VideoPositionEmb, ActionPositionEmb
+from .common_blocks import SinusoidalPosEmb, VideoPositionEmb, ActionPositionEmb, VideoLearnedPositionEmb, ActionLearnablePositionEmb
 import torch.functional as F
 from einops import pack, unpack
 from .dit_video_blocks import PatchVideo, MMDiTBlock, PatchVideoTempMask, MMDiTBlockModalitySharing,MMDiTBlockFullSharing, MMDiTBlockHyperConnections, MMDiTSplitAttentionBlock, FinalLayer, interleave_masks_1d, interleave_masks_2d
@@ -28,7 +28,7 @@ class VideoDiTModel(Model):
                 add_temp_mask = False,
         ):
         super().__init__()
-        self.dim_Cf = 4
+        self.dim_Cf = dim_C
         self.n_layers = n_layers
         self.n_head = n_head
         self.patch_lw = patch_lw
@@ -97,11 +97,11 @@ class VideoDiTModel(Model):
                     patch_t = self.patch_t,
                     )
             
-        self.action_pos_embed = ActionPositionEmb(self.dim_Tp + self.dim_Tf, self.dim_head, theta=10000.0) # both future and past tokens simultaneously
-        self.video_pos_embed = VideoPositionEmb(
+        self.action_pos_embed = ActionLearnablePositionEmb(self.dim_Tp + self.dim_Tf, self.dim_head, theta=10000.0) # both future and past tokens simultaneously
+        self.video_pos_embed = VideoLearnedPositionEmb(
             head_dim=self.dim_head,
-            len_h=self.dim_H,
-            len_w=self.dim_W,
+            len_h=self.dim_H // self.patch_lw,
+            len_w=self.dim_W // self.patch_lw,
             len_t=self.dim_Lp + self.dim_Lf, # notice how we embed both future and past tokens simultaneously
             theta=10000.0,
             device=device

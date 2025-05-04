@@ -79,7 +79,7 @@ def compute_val_loss(cfg, model, val_dataloader, noise_scheduler, accelerator, p
         else:
             u = torch.randn((bs,1), device=accelerator.device)
             timesteps = 1.0 / (1.0 + torch.exp(-u))
-            timesteps = timesteps * n_timesteps
+            timesteps = timesteps # n_timesteps
         # Add noise to latents
         batch['noisy_latents'] = noise_scheduler.add_noise(latents, noise, timesteps)
 
@@ -133,8 +133,8 @@ def main(cfg):
         cfg.train.batch_size = 4
         cfg.val.batch_size = 1
         cfg.exp_prefix = 'one-sample'
-        cfg.train.save_model_iters = 6000
-        cfg.train.val_iters = 800
+        cfg.train.save_model_iters = 60000
+        cfg.train.val_iters = 1000
         cfg.conditioning.prompt_file = 'prompts_one_sample.txt'
         cfg.val.run = True
         cfg.val.skip_val_loss = True
@@ -164,8 +164,8 @@ def main(cfg):
         dtype="bfloat16",
     )
 
-    img_vae = VAEWrapper() # img_vae.to(cfg.device, dtype=cfg.image_tokenizer.dtype)
-    # img_vae = vid_vae
+    # img_vae = VAEWrapper() # img_vae.to(cfg.device, dtype=cfg.image_tokenizer.dtype)
+    img_vae = vid_vae
     
     for param in img_vae.parameters():
         param.requires_grad = False
@@ -283,7 +283,7 @@ def main(cfg):
             else:
                 u = torch.randn((bs,1), device=accelerator.device)
                 timesteps = 1.0 / (1.0 + torch.exp(-u))
-                timesteps = timesteps * cfg.model.noise_steps
+                timesteps = timesteps
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
             batch['noisy_latents'] = noisy_latents
@@ -355,6 +355,7 @@ def main(cfg):
                             sample_videos, sample_grids = sampler.sample_video(
                                 cfg,
                                 dataloader=train_dataloader,
+                                batch=batch,
                                 batch_idx=2,
                                 vae=vid_vae, 
                                 accelerator=accelerator,
@@ -366,6 +367,7 @@ def main(cfg):
                         elif 'future_frame' in cfg.gen_type.lower():
                             samples = sampler.sample_future_frame(
                                 cfg,
+                                batch=batch,
                                 dataloader=val_dataloader,
                                 batch_idx=0,
                                 img_vae=img_vae,

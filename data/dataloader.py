@@ -155,9 +155,9 @@ def encode_batch(cfg, batch, accelerator, vae=None, img_vae=None, vid_vae=None):
         if type(batch['past_frames']) == list:
             batch['past_frames'] = torch.concat(batch['past_frames'], 0)    
         batch = encode_batch_key(cfg, batch, vid_vae, 'past_frames', 'past_latents')
-        batch['future_frames'] = batch['future_frames'].squeeze(2)
+        # batch['future_frames'] = batch['future_frames'].squeeze(2)
         batch = encode_batch_key(cfg, batch, img_vae, 'future_frames', 'future_latents')
-        batch['future_latents'] = batch['future_latents'].unsqueeze(2)
+        # batch['future_latents'] = batch['future_latents'].unsqueeze(2)
         return batch['future_latents'], batch
     else:
         imgs = batch['imgs']
