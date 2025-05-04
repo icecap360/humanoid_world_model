@@ -59,7 +59,19 @@
             "name": "train (debug)",
             "type": "debugpy",
             "request": "launch",
-            "program": "train.py",
+            "program": "train_futureframe.py",
+            "console": "integratedTerminal",
+            "args": ["debug=True"],
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2"
+            }
+        },
+        {
+            "name": "train future frame",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "train_futureframe.py",
             "console": "integratedTerminal",
             "args": ["debug=True"],
             "justMyCode": false,
@@ -131,7 +143,16 @@
             "type": "debugpy",
             "request": "launch",
             "program": "calculate_fid.py",
-            "console": "integratedTerminal"
+            "console": "integratedTerminal",
+            "args": ["debug=True"],
+        },
+        {
+            "name": "profiler",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "profile_model.py",
+            "console": "integratedTerminal",
+            // "args": ["debug=True"],
         },
     ]
 }

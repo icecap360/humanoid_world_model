@@ -4,7 +4,7 @@ import torch
 from einops import pack, unpack
 
 from .rawimage_dataset import RawImageDataset
-from .video_dataset import RawVideoDataset, RawVideoDataset_collate_fn, encode_video_batch
+from .video_dataset import RawVideoDataset, RawVideoDataset_collate_fn, encode_video_batch, FutureImageDataset, encode_batch_key
 from .coco_dataset import CustomCoco
 from functools import partial
 
@@ -24,6 +24,8 @@ def get_dataloaders(
     num_past_frames=None,
     num_future_frames=None,
     vae=None,
+    img_vae=None,
+    vid_vae=None,
     conditioning_manager=None,
     return_datasets=False,
     val_stride=None
@@ -35,6 +37,38 @@ def get_dataloaders(
         val_dataset = RawImageDataset(hmwm_val_dir)
         if return_datasets:
             return train_dataset, val_dataset
+    elif data_type == "1xgpt_future_frame":
+        assert conditioning_type != "text", "Conditioning must not be 'text' for 1xgpt dataset."
+        assert num_past_frames != None
+        assert num_future_frames != None
+        with_action = False
+        if conditioning_type == 'action':
+            with_action = True
+        train_dataset = FutureImageDataset(hmwm_train_dir,
+                                        cfg,
+                                        n_input=17,
+                                        n_output=1,
+                                        n_intermediate=60,
+                                        with_actions=with_action,
+                                        stride=1
+                                        ) # num_past_frames // 2
+        val_dataset = FutureImageDataset(hmwm_val_dir,
+                                    cfg,
+                                    n_input=17,
+                                    n_output=1,
+                                    n_intermediate=60,
+                                    with_actions=with_action,
+                                    stride=num_past_frames // 2 if val_stride==None else val_stride)
+        if return_datasets:
+            return train_dataset, val_dataset
+        train_dataloader = DataLoader(train_dataset, batch_size=train_batch_size, shuffle=True,
+            # collate_fn=partial(RawVideoDataset_collate_fn, cfg, vae),
+            **get_dataloader_kwargs())
+        val_dataloader = DataLoader(val_dataset, batch_size=val_batch_size, 
+            # collate_fn=partial(RawVideoDataset_collate_fn, cfg, vae), 
+            shuffle=False, **get_dataloader_kwargs())
+        
+        return train_dataloader, val_dataloader
     elif data_type == "1xgpt_video":
         assert conditioning_type != "text", "Conditioning must not be 'text' for 1xgpt dataset."
         assert num_past_frames != None
@@ -113,10 +147,18 @@ def get_dataloader_kwargs():
 def no_collate_fn(batch):
     return batch
 
-def encode_batch(cfg, batch, vae, accelerator):
+def encode_batch(cfg, batch, accelerator, vae=None, img_vae=None, vid_vae=None):
     if 'video' in cfg.gen_type.lower():
         batch = encode_video_batch(cfg, batch, vae)
-        return batch['future_latents'], encode_video_batch(cfg, batch, vae)
+        return batch['future_latents'], batch
+    elif 'future_frame' in cfg.gen_type.lower():
+        if type(batch['past_frames']) == list:
+            batch['past_frames'] = torch.concat(batch['past_frames'], 0)    
+        batch = encode_batch_key(cfg, batch, vid_vae, 'past_frames', 'past_latents')
+        # batch['future_frames'] = batch['future_frames'].squeeze(2)
+        batch = encode_batch_key(cfg, batch, img_vae, 'future_frames', 'future_latents')
+        # batch['future_latents'] = batch['future_latents'].unsqueeze(2)
+        return batch['future_latents'], batch
     else:
         imgs = batch['imgs']
         with accelerator.autocast():

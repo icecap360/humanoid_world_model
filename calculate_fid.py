@@ -197,7 +197,7 @@ def main(cfg: DictConfig):
     )
 
     # Determine number of samples (use length of dataloader)
-    num_samples = 5000
+    num_samples = int(5000//3)
     _ = (
         len(val_dataloader.dataset)
         if hasattr(val_dataloader, "dataset")
@@ -437,7 +437,7 @@ def main(cfg: DictConfig):
                 num_fid_to_calc = (
                     final_num_fid_samples  # Use all generated samples by default
                 )
-
+                
                 fid_score = fid.compute_fid(
                     real_dir,
                     fake_dir,

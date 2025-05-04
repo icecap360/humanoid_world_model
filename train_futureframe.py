@@ -18,6 +18,7 @@ import hydra
 from collections import OrderedDict
 from omegaconf import DictConfig, OmegaConf
 import tqdm
+from stable_diffusion_vae import VAEWrapper
 import datetime
 from diffusers.optimization import get_cosine_schedule_with_warmup
 from schedulers import get_scheduler
@@ -53,7 +54,7 @@ def setup_distributed_training(config):
     set_seed(config.seed)
     return accelerator
 
-def compute_val_loss(cfg, model, val_dataloader, vae_model, noise_scheduler, accelerator, progress_bar_enabled=True):
+def compute_val_loss(cfg, model, val_dataloader, noise_scheduler, accelerator, progress_bar_enabled=True, vae=None, img_vae=None, vid_vae=None):
     model.eval()
     total_loss = 0.0
     total_samples = 0
@@ -66,27 +67,24 @@ def compute_val_loss(cfg, model, val_dataloader, vae_model, noise_scheduler, acc
         pbar = None
 
     for step, batch in enumerate(val_dataloader):
-        latents, batch = encode_batch(cfg, batch, vae_model, accelerator)
+        latents, batch = encode_batch(cfg, batch, accelerator, vae=vid_vae, img_vae=img_vae, vid_vae=vid_vae)
         bs = latents.shape[0]
         noise = torch.randn(latents.shape, device=accelerator.device)
         if cfg.use_discrete_time:
-            timesteps = torch.randint(
-                0, n_timesteps,
-                (bs,1),
-                device=accelerator.device, dtype=torch.int64
-            )
+            timesteps = torch.randint(0,  cfg.model.noise_steps, (bs,1), device=latents.device,dtype=torch.int64)
         else:
             u = torch.randn((bs,1), device=accelerator.device)
             timesteps = 1.0 / (1.0 + torch.exp(-u))
-            timesteps = timesteps * n_timesteps
+            timesteps = timesteps
         # Add noise to latents
         batch['noisy_latents'] = noise_scheduler.add_noise(latents, noise, timesteps)
 
         with torch.no_grad():
             # Predict the noise residual
             noise_pred = model(batch, timesteps, accelerator.device, use_cfg=True)
+            noise_target = noise_scheduler.get_target(latents, noise, timesteps)
             # Compute mean squared error loss (averaged over the batch)
-            loss = F.mse_loss(noise_pred, noise, reduction="mean")
+            loss = F.mse_loss(noise_pred, noise_target, reduction="mean")
         
         total_loss += loss.item() * bs
         total_samples += bs
@@ -132,38 +130,43 @@ def main(cfg):
         cfg.train.batch_size = 4
         cfg.val.batch_size = 1
         cfg.exp_prefix = 'one-sample'
-        cfg.train.save_model_iters = 6000
-        cfg.train.val_iters = 2
+        cfg.train.save_model_iters = 60000
+        cfg.train.val_iters = 1000
         cfg.conditioning.prompt_file = 'prompts_one_sample.txt'
         cfg.val.run = True
         cfg.val.skip_val_loss = True
         cfg.val.skip_img_sample = False
 
-    tokenizer_config = TokenizerConfigs[cfg.image_tokenizer.tokenizer_type].value
-    tokenizer_config.update(dict(spatial_compression=cfg.image_tokenizer.spatial_compression))
+    # tokenizer_config = TokenizerConfigs['CI'].value
+    # tokenizer_config.update(dict(spatial_compression=cfg.image_tokenizer.spatial_compression))
     logger.disable('cosmos_tokenizer') # turnoff logging
-    if "I" in cfg.image_tokenizer.tokenizer_type:
-        model_name = f"Cosmos-Tokenizer-{cfg.image_tokenizer.tokenizer_type}{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
-        vae = ImageTokenizer(
-            checkpoint=Path(cfg.image_tokenizer.path) / model_name / "autoencoder.jit",
-            checkpoint_enc=Path(cfg.image_tokenizer.path) / model_name / "encoder.jit",
-            checkpoint_dec=Path(cfg.image_tokenizer.path) / model_name / "decoder.jit",
-            tokenizer_config=tokenizer_config,
-            device=None,
-            dtype=cfg.image_tokenizer.dtype,
-        )
-    else:
-        model_name = f"Cosmos-Tokenizer-{cfg.image_tokenizer.tokenizer_type}{cfg.image_tokenizer.temporal_compression}x{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
-        vae = CausalVideoTokenizer(
-            checkpoint=Path(cfg.image_tokenizer.path) / model_name / "autoencoder.jit",
-            checkpoint_enc=Path(cfg.image_tokenizer.path) / model_name / "encoder.jit",
-            checkpoint_dec=Path(cfg.image_tokenizer.path) / model_name / "decoder.jit",
-            tokenizer_config=tokenizer_config,
-            device=None,
-            dtype="bfloat16",
-        )
+    model_name = f"Cosmos-Tokenizer-CI{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
+    img_vae = ImageTokenizer(
+        checkpoint=Path(cfg.image_tokenizer.path) / model_name / "autoencoder.jit",
+        checkpoint_enc=Path(cfg.image_tokenizer.path) / model_name / "encoder.jit",
+        checkpoint_dec=Path(cfg.image_tokenizer.path) / model_name / "decoder.jit",
+        # tokenizer_config=tokenizer_config,
+        device=None,
+        dtype=cfg.image_tokenizer.dtype,
+    )
+    # tokenizer_config = TokenizerConfigs['CV'].value
+    # tokenizer_config.update(dict(spatial_compression=cfg.image_tokenizer.spatial_compression))
+    model_name = f"Cosmos-Tokenizer-CV{cfg.image_tokenizer.temporal_compression}x{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
+    vid_vae = CausalVideoTokenizer(
+        checkpoint=Path(cfg.image_tokenizer.path) / model_name / "autoencoder.jit",
+        checkpoint_enc=Path(cfg.image_tokenizer.path) / model_name / "encoder.jit",
+        checkpoint_dec=Path(cfg.image_tokenizer.path) / model_name / "decoder.jit",
+        # tokenizer_config=tokenizer_config,
+        device=None,
+        dtype="bfloat16",
+    )
 
-    for param in vae.parameters():
+    # img_vae = VAEWrapper() # img_vae.to(cfg.device, dtype=cfg.image_tokenizer.dtype)
+    img_vae = vid_vae
+    
+    for param in img_vae.parameters():
+        param.requires_grad = False
+    for param in vid_vae.parameters():
         param.requires_grad = False
 
     conditioning_manager = ConditioningManager(cfg.conditioning)
@@ -171,7 +174,9 @@ def main(cfg):
     train_dataloader, val_dataloader = get_dataloaders(
         cfg.data.type,
         cfg,
-        vae=vae.module if hasattr(vae, "module") else vae,
+        vae=vid_vae,
+        img_vae=img_vae.module if hasattr(img_vae, "module") else img_vae,
+        vid_vae=vid_vae.module if hasattr(vid_vae, "module") else vid_vae,
         hmwm_train_dir=cfg.data.hmwm_train_dir,
         hmwm_val_dir=cfg.data.hmwm_val_dir,
         coco_train_imgs=cfg.data.coco_train_imgs,
@@ -189,7 +194,7 @@ def main(cfg):
 
     noise_scheduler = get_scheduler(cfg.model.scheduler_type, cfg.model.noise_steps)
 
-    latent_channels= tokenizer_config["latent_channels"] # 3
+    latent_channels= 16 # 3
 
     model = get_model(cfg, latent_channels, conditioning_manager, cfg.image_size // cfg.image_tokenizer.spatial_compression)
 
@@ -200,7 +205,7 @@ def main(cfg):
         num_training_steps=(len(train_dataloader) * cfg.train.num_epochs),
     )
     
-    sampler = samplers.Sampler(vae, noise_scheduler, cfg.seed, cfg.image_tokenizer.spatial_compression, latent_channels, cfg.model.noise_steps)
+    sampler = samplers.Sampler(vid_vae, noise_scheduler, cfg.seed, cfg.image_tokenizer.spatial_compression, latent_channels, cfg.model.noise_steps)
 
     accelerator = setup_distributed_training(cfg)
     if accelerator.is_main_process and not cfg.debug:
@@ -221,8 +226,8 @@ def main(cfg):
             os.makedirs(cfg.log_dir, exist_ok=True)
         accelerator.init_trackers("train_ddpm")
 
-    model, vae, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
-            model, vae, optimizer, train_dataloader, val_dataloader, lr_scheduler
+    model, img_vae, vid_vae, optimizer, train_dataloader, val_dataloader, lr_scheduler = accelerator.prepare(
+            model, img_vae, vid_vae, optimizer, train_dataloader, val_dataloader, lr_scheduler
         )
     conditioning_manager.to(accelerator.device)
     
@@ -248,7 +253,7 @@ def main(cfg):
     formatted_datetime = now.strftime("%B-%d-%H-%M")
     eval_dir = Path(cfg.log_dir) / (cfg.model.scheduler_type + ' ' + formatted_datetime)
 
-    vae_model = vae.module if hasattr(vae, "module") else vae
+    img_vae, vid_vae = img_vae.module if hasattr(img_vae, "module") else img_vae, vid_vae.module if hasattr(vid_vae, "module") else vid_vae
     if cfg.one_sample:
         first_batch = next(iter(train_dataloader))
     global_step = 0
@@ -268,7 +273,7 @@ def main(cfg):
             if cfg.one_sample:
                 batch = first_batch
             
-            latents, batch = encode_batch(cfg, batch, vae_model, accelerator)
+            latents, batch = encode_batch(cfg, batch, accelerator, img_vae=img_vae, vid_vae=vid_vae, vae=vid_vae)
             noise = torch.randn(latents.shape, device=latents.device)
             bs = latents.shape[0]
             if cfg.use_discrete_time:
@@ -276,7 +281,7 @@ def main(cfg):
             else:
                 u = torch.randn((bs,1), device=accelerator.device)
                 timesteps = 1.0 / (1.0 + torch.exp(-u))
-                timesteps = timesteps * cfg.model.noise_steps
+                timesteps = timesteps
             noisy_latents = noise_scheduler.add_noise(latents, noise, timesteps)
 
             batch['noisy_latents'] = noisy_latents
@@ -331,7 +336,7 @@ def main(cfg):
 
                 # Log validation loss
                 if not cfg.val.skip_val_loss:
-                    val_loss = compute_val_loss(cfg, model_unwrapped, val_dataloader, vae_model, noise_scheduler,  accelerator)
+                    val_loss = compute_val_loss(cfg, model_unwrapped, val_dataloader, noise_scheduler,  accelerator, vae=vid_vae, img_vae=img_vae, vid_vae=vid_vae)
                     if accelerator.is_main_process:
                         if not cfg.debug:
                             wandb.log({
@@ -348,8 +353,24 @@ def main(cfg):
                             sample_videos, sample_grids = sampler.sample_video(
                                 cfg,
                                 dataloader=train_dataloader,
-                                batch_idx=75,
-                                vae=vae_model, 
+                                batch=batch,
+                                batch_idx=2,
+                                vae=vid_vae, 
+                                accelerator=accelerator,
+                                model=model_unwrapped,
+                                guidance_scale=cfg.model.cfg_scale,
+                                dtype=noisy_latents.dtype,
+                                device=accelerator.device
+                            )
+                        elif 'future_frame' in cfg.gen_type.lower():
+                            samples = sampler.sample_future_frame(
+                                cfg,
+                                batch=batch,
+                                dataloader=val_dataloader,
+                                batch_idx=0,
+                                vae=vid_vae,
+                                img_vae=img_vae,
+                                vid_vae=vid_vae,
                                 accelerator=accelerator,
                                 model=model_unwrapped,
                                 guidance_scale=cfg.model.cfg_scale,
@@ -374,8 +395,10 @@ def main(cfg):
                                 device=accelerator.device, 
                                 dtype=noisy_latents.dtype)
 
-                        if 'image' in cfg.gen_type.lower():
-                            image_grid = make_image_grid(samples, rows=4, cols=4)
+                        if 'image' in cfg.gen_type.lower() or 'frame' in cfg.gen_type.lower():
+                            rows = max(len(samples) // 4, 1)
+                            cols = len(samples) // max(rows, 1)
+                            image_grid = make_image_grid(samples, rows=rows, cols=cols)
                             os.makedirs(eval_dir, exist_ok=True)
                             image_grid.save(path)
                             logging.info(f"Sampled images to : {path}")

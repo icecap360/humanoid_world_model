@@ -204,6 +204,140 @@ class RawVideoDataset(TorchDataset):
             "video_path": self.video_paths[shard_idx]
         }
 
+class FutureImageDataset(RawVideoDataset):
+    def __init__(self, data_dir, cfg, n_input=17, n_intermediate=60, n_output=1, stride=1, skip_frame=1, with_actions = True):
+        TorchDataset.__init__(self)
+        # mp.set_start_method('spawn')
+
+        self.data_dir = Path(data_dir)
+        self.cfg= cfg
+        self.image_size = cfg.image_size
+        
+        # Load main metadata
+        with open(self.data_dir / "metadata.json") as f:
+            metadata = json.load(f)
+            self.num_shards = metadata["num_shards"]
+            self.query = metadata["query"]
+            self.hz = metadata["hz"]
+            self.num_images = metadata["num_images"]
+        
+        # Load shard-specific metadata
+        self.shard_sizes = []
+        for shard in range(self.num_shards):
+            with open(self.data_dir / f"metadata/metadata_{shard}.json") as f:
+                shard_metadata = json.load(f)
+                self.shard_sizes.append(shard_metadata["shard_num_frames"])
+        
+        # Calculate cumulative shard sizes for index mapping
+        self.cumulative_sizes = np.cumsum([0] + self.shard_sizes)
+        assert self.cumulative_sizes[-1] == self.num_images, "Metadata mismatch in total number of frames"
+        
+        # Store video paths instead of keeping captures open
+        self.video_paths = [
+            str(self.data_dir / f"videos/video_{shard}.mp4")
+            for shard in range(self.num_shards)
+        ]
+        
+        # Store action paths, and open them up if with_actions
+        self.action_paths = [
+            str(self.data_dir / f"states/states_{shard}.bin")
+            for shard in range(self.num_shards)
+        ]
+        self.with_actions = with_actions
+        if self.with_actions:
+            self.action_shards = []
+            for i,path in enumerate(self.action_paths):
+                action_shard = np.memmap(path, dtype=np.float32, mode="r", shape=(self.shard_sizes[i], 25))
+                self.action_shards.append(
+                    action_shard
+                )
+            self.action_shards = np.concatenate(self.action_shards, 0)
+            self.action_shards = (self.action_shards - np.mean(self.action_shards, 0)) / np.std(self.action_shards, 0)
+        
+        # Store action paths, and open them up if with_actions
+        self.segment_paths = [
+            str(self.data_dir / f"segment_idx/segment_idx_{shard}.bin")
+            for shard in range(self.num_shards)
+        ]
+        
+        segment_shards = []
+        for i,path in enumerate(self.segment_paths):
+            segment_shard = np.memmap(path, dtype=np.int32, mode="r", shape=(self.shard_sizes[i], 1))
+            segment_shards.append(segment_shard)
+        self.segment_shards = np.concatenate(segment_shards).squeeze(-1)
+        
+        # Compute the valid start indexes            
+        self.n_input, self.n_output, self.stride, self.skip_frame = n_input, n_output, stride, skip_frame
+        self.n_intermediate = n_intermediate
+        # Number of frames between the first and last frames of a video sequence (excluding one endpoint frame)
+        self.video_len = (self.n_input + self.n_intermediate + self.n_output) # * self.skip_frame 
+        
+        start_indices = np.arange(0, self.num_images - self.video_len, self.stride)
+        end_indices = start_indices + self.video_len
+        
+        start_segment_ids = self.segment_shards[start_indices] # 
+        end_segment_ids = self.segment_shards[end_indices] # 
+        
+        self.valid_start_inds = start_indices[start_segment_ids == end_segment_ids]
+
+        # Verify all video files exist and are readable
+        for path in self.video_paths:
+            if not Path(path).exists():
+                raise FileNotFoundError(f"Video file not found: {path}")
+            cap = cv2.VideoCapture(path)
+            if not cap.isOpened():
+                cap.release()
+                raise IOError(f"Could not open video file: {path}")
+            cap.release()
+        
+        # Verify all action files exist and are readable
+        for path in self.action_paths:
+            if not Path(path).exists():
+                raise FileNotFoundError(f"Video file not found: {path}")
+            
+    def __getitem__(self, idx):
+        if idx < 0 or idx >= len(self.valid_start_inds):
+            raise IndexError(f"Index {idx} is out of bounds for dataset with {self.num_images} images")
+
+        start_idx = self.valid_start_inds[idx]
+        end_idx = start_idx + self.n_input
+        start_shard_idx, start_frame_idx = self.get_index_info(start_idx)
+        end_shard_idx, end_frame_idx = self.get_index_info(end_idx)
+        
+        assert self.segment_shards[start_idx] == self.segment_shards[end_idx]         
+        in_frames = self.extract_frames_opencv(
+            start_shard_idx,
+            end_shard_idx,
+            start_frame_idx, 
+            end_frame_idx
+        )
+        in_frames = np.moveaxis(in_frames, 3, 0)
+        in_frames = in_frames/_UINT8_MAX_F * 2.0 - 1.0
+        
+        ret = {}
+        if self.with_actions:
+            ret["past_actions"] = self.action_shards[start_idx:start_idx+self.n_input].astype(np.float32)
+            
+        start_idx = self.valid_start_inds[idx] + self.n_input + self.n_intermediate
+        end_idx = start_idx + self.n_output
+        start_shard_idx, start_frame_idx = self.get_index_info(start_idx)
+        end_shard_idx, end_frame_idx = self.get_index_info(end_idx)
+        assert self.segment_shards[start_idx] == self.segment_shards[end_idx] 
+        out_frame = self.extract_frames_opencv(
+            start_shard_idx,
+            end_shard_idx,
+            start_frame_idx, 
+            end_frame_idx
+        )
+        out_frame = np.moveaxis(out_frame, 3, 0)
+        out_frame = out_frame/_UINT8_MAX_F * 2.0 - 1.0
+        
+        ret["past_frames"] = in_frames.astype(np.float32), 
+        ret["future_frames"] = out_frame.astype(np.float32)
+        if self.with_actions:
+            ret["future_actions"] = self.action_shards[start_idx:end_idx].astype(np.float32)
+        
+        return ret
 def RawVideoDataset_collate_fn(cfg, vae, samples):
     '''
     We encode the batches in the collate_fn to speed up the dataloader
@@ -251,6 +385,13 @@ def encode_video_batch(cfg, batch, vae):
     batch['future_latents'] = future_latents.to(orig_dtype)
     return batch
 
+def encode_batch_key(cfg, batch, vae, frame_key, latent_key):
+    orig_dtype = batch[frame_key].dtype
+    frames = batch[frame_key].to(vae._dtype)
+    device = next(vae.parameters()).device
+    (latent, ) = vae.encode(frames.to(device))
+    batch[latent_key] = latent.to(orig_dtype)
+    return batch
 def create_condition_latent(tokenizer, past_frames, num_past_frames, num_future_frames, num_past_latents, num_future_latent, device):
     B, C, T, H, W = past_frames.shape
     

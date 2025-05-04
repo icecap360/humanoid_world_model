@@ -1,0 +1,10 @@
+opencv-python
+torch
+hydra-core
+numpy
+PIL
+wandb
+timm
+diffusers
+loguru
+einops

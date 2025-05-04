@@ -305,7 +305,7 @@ class SinusoidalPosEmb(nn.Module):
         self.dim = dim
         self.theta = theta
 
-    def forward(self, t, dtype=torch.float32):
+    def forward(self, t, mul_factor=1000, dtype=torch.float32):
         # from lucidrains
         # device = t.device
         # half_dim = self.dim // 2
@@ -315,14 +315,16 @@ class SinusoidalPosEmb(nn.Module):
         # emb = torch.cat((emb.sin(), emb.cos()), dim=-1)
         
         # notice how we interleave the sin and cos, some repos simply concatenate them
-        time_indices = torch.arange(0, self.dim, 2)
-        denominator = torch.exp(math.log(self.theta) * 2* time_indices / self.dim)
-        denominator = denominator.to(t.device).unsqueeze(0)
-        # t = t.squeeze(-1).squeeze(-1)
-        emb = torch.zeros((t.shape[0], self.dim), device=t.device)
-        emb[:, 0::2] = torch.sin(t / denominator)
-        emb[:, 1::2] = torch.cos(t / denominator)
-        return emb
+        t = t * mul_factor
+        half = self.dim // 2
+        inds = torch.arange(half, device = t.device, dtype = t.dtype)
+        freqs = (
+            -math.log(self.theta) * inds / half
+        ).exp()
+        embs = t[:,None] * freqs[None]
+        embs = torch.cat([torch.cos(embs), torch.sin(embs)], dim = -1)
+        embs = embs.squeeze(1)
+        return embs
 
 #################################################################################
 #                   Sine/Cosine Positional Embedding Functions                  #
@@ -401,6 +403,48 @@ class ActionPositionEmb(nn.Module):
         embeddings[..., 1::2] = embeddings[..., 1::2] * cos_enc + embeddings[..., 0::2] * sin_enc
         return embeddings
 
+class ActionLearnablePositionEmb(nn.Module):
+    """
+    Learnable positional embeddings for action tokens in **bhsd** format.
+
+    Args
+    ----
+    len_t : int
+        Maximum sequence length.
+    hidden_dim : int
+        Embedding dimension (must match the model’s hidden size).
+    theta : float, optional
+        Kept for API compatibility; unused in the learnable version.
+    """
+    def __init__(self, len_t: int, hidden_dim: int, theta: float = 10000):
+        super().__init__()
+        self.theta = float(theta)            # kept to avoid breaking old configs
+
+        # Trainable table of shape [seq_len, hidden_dim]
+        self.pos_embed = nn.Parameter(torch.zeros(len_t, hidden_dim))
+        nn.init.trunc_normal_(self.pos_embed, std=0.02)  # ViT-style init
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Parameters
+        ----------
+        x : torch.Tensor
+            Input tensor of shape **[B, H, S, D]**.
+
+        Returns
+        -------
+        torch.Tensor
+            Same shape as `x`, with positional offsets added.
+        """
+        b, h, s, d = x.shape
+        if s > self.pos_embed.size(0):
+            raise ValueError(
+                f"Sequence length {s} exceeds maximum {self.pos_embed.size(0)}"
+            )
+
+        pos = self.pos_embed[:s].to(dtype=x.dtype)        # [S, D]
+        pos = pos.unsqueeze(0).unsqueeze(0)               # [1, 1, S, D]
+        return x + pos                                    # broadcast over 
 
 class VideoRopePosition3DEmb(nn.Module):
     def __init__(
@@ -551,61 +595,101 @@ class VideoPositionEmb(VideoRopePosition3DEmb):
         tensor_format: str = "bshd",
     ) -> torch.Tensor:
         """
-        Apply rotary positional embedding tensor to the input tensor.
-
-        Parameters
-        ----------
-        t: torch.Tensor
-            Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
-            rotary positional embedding will be applied.
-        freqs: torch.Tensor
-            Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
-            with `s2 >= s` and `d2 <= d`.
-        fused: bool, default = False
-            Whether to use a fused applying RoPE implementation.
-        tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
-            is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
-            of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
-        cu_seqlens: torch.Tensor, default = None.
-            Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
-            dtype torch.int32. Only valid when `tensor_format` is 'thd'.
-            Should be `cu_seqlens_padded` when cp_size > 1.
-        cp_size: int, default = 1.
-            Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
-        cp_rank: int, default = 0.
-            Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
+        Apply rotary positional embedding to `t` in one of three layouts:
+          - 'sbhd': [seq, batch, heads, dim]
+          - 'bshd': [batch, seq, heads, dim]
+          - 'bhsd': [batch, heads, seq, dim]
         """
-        assert tensor_format in ("sbhd", "bshd"), (
-            "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
-            f"when fused is False, got {tensor_format}."
+        assert tensor_format in ("sbhd", "bshd", "bhsd"), (
+            f"Only formats `sbhd`, `bshd` or `bhsd` are supported, got {tensor_format}."
         )
 
         max_seq_len = freqs.shape[0]
-        cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
-
-        # Only apply the rotary embeddings up to the sequence length of the running
-        # input.
-        assert (
-            cur_seq_len <= max_seq_len
-        ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-        freqs = freqs[:cur_seq_len]
+        # pick out current sequence length based on layout
         if tensor_format == "bshd":
-            freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
-        # cos/sin first then dtype conversion for better precision
+            cur_seq_len = t.shape[1]
+        elif tensor_format == "bhsd":
+            cur_seq_len = t.shape[2]
+        else:  # sbhd
+            cur_seq_len = t.shape[0]
+
+        assert cur_seq_len <= max_seq_len, (
+            f"Rotary embeddings only supported up to length {max_seq_len}, "
+            f"got {cur_seq_len}."
+        )
+        freqs = freqs[:cur_seq_len]  # [seq, 1, 1, dim]
+
+        # reshape freqs to align with t
+        if tensor_format == "bshd":
+            # from [seq,1,1,dim] -> [1,seq,1,dim]
+            freqs = freqs.transpose(0, 1)
+        elif tensor_format == "bhsd":
+            # from [seq,1,1,dim] -> [1,1,seq,dim]
+            freqs = freqs.permute(1, 2, 0, 3)
+        # if 'sbhd', leave as [seq,1,1,dim]
+
+        # compute cos/sin once
         cos_ = torch.cos(freqs).to(t.dtype)
         sin_ = torch.sin(freqs).to(t.dtype)
 
         rot_dim = freqs.shape[-1]
-        # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
-        t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+        t_rot, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-        # first part is cosine component
-        # second part is sine component, need to change signs with _rotate_half method
-        t = (t * cos_) + (_rotate_half(t) * sin_)
-        return torch.cat((t, t_pass), dim=-1)
+        # apply: (x * cos) + (rotate_half(x) * sin)
+        t_out = (t_rot * cos_) + (_rotate_half(t_rot) * sin_)
+        return torch.cat((t_out, t_pass), dim=-1)
 
 
+class VideoLearnedPositionEmb(VideoRopePosition3DEmb):
+    """
+    Learnable 3-D positional embeddings for video transformers.
 
+    *Only* supports tensor layout **bhsd** → [batch, heads, seq, dim].
+    """
+    def __init__(
+        self,
+        *,                       # enforce keyword args
+        head_dim: int,
+        len_h: int,
+        len_w: int,
+        len_t: int,
+        base_fps: int = 30,      # kept for API compatibility
+        **kwargs,                # ignore extra arguments
+    ):
+        super().__init__(
+            head_dim=head_dim,
+            len_h=len_h,
+            len_w=len_w,
+            len_t=len_t,
+            base_fps=base_fps,
+            **kwargs,
+        )
+
+        # Trainable grid [t, h, w, dim]  → flattened at runtime
+        self.pos_embed = nn.Parameter(
+            torch.zeros(len_t, len_h, len_w, head_dim)  # initialised to zero
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        """
+        Add positional embeddings to `x`.
+
+        Parameters
+        ----------
+        x : torch.Tensor
+            Shape **[B, H, S, D]** where S = len_t · len_h · len_w.
+
+        Returns
+        -------
+        torch.Tensor
+            Same shape as `x`, with learnable positional offsets added.
+        """
+        b, h, s, d = x.shape
+        pos = self.pos_embed.view(-1, d).to(x.dtype)      # [S, D]
+        assert s == pos.shape[0], "sequence length mismatch"
+
+        # Broadcast to [1, 1, S, D] → added over batch & heads
+        return x + pos[None, None, :, :]
 
 def _rotate_half(x: torch.Tensor) -> torch.Tensor:
     """
