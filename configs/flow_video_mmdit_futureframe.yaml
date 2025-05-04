@@ -1,5 +1,5 @@
 train:
-  batch_size: 1
+  batch_size: 4 
   learning_rate: 1e-4
   lr_warmup_steps: 0
   num_epochs: 500
@@ -44,7 +44,7 @@ model:
   patch_size: 2
 
 data:
-  type: "1xgpt_video"
+  type: "1xgpt_future_frame"
   hmwm_train_dir: "/pub0/qasim/1xgpt/data/data_v2_raw/train_v2.0_raw"
   hmwm_val_dir: "/pub0/qasim/1xgpt/data/data_v2_raw/val_v2.0_raw"
   coco_train_imgs: "/pub0/data/mscoco_2017/coco/images/train2017"
@@ -56,9 +56,9 @@ conditioning:
   type: "action"
   text_tokenizer: "CLIP"  # Options: ["T5", "CLIP"]
   prompt_file: "sample_prompts.txt"
-  num_past_frames: 9
-  num_future_frames: 8
-  num_past_latents: 2
+  num_past_frames: 17
+  num_future_frames: 1
+  num_past_latents: 3
   num_future_latents: 1
   dim_act: 25
 

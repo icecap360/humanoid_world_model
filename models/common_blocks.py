@@ -595,58 +595,50 @@ class VideoPositionEmb(VideoRopePosition3DEmb):
         tensor_format: str = "bshd",
     ) -> torch.Tensor:
         """
-        Apply rotary positional embedding tensor to the input tensor.
-
-        Parameters
-        ----------
-        t: torch.Tensor
-            Input tensor of shape `[s, b, h, d]`, `[b, s, h, d]` or `[t, h, d]`, on which
-            rotary positional embedding will be applied.
-        freqs: torch.Tensor
-            Rotary positional embedding tensor of shape `[s2, 1, 1, d2]` and dtype 'float',
-            with `s2 >= s` and `d2 <= d`.
-        fused: bool, default = False
-            Whether to use a fused applying RoPE implementation.
-        tensor_format: {'sbhd', 'bshd', 'thd'}, default = 'sbhd'
-            is `bshd` if `t` is of shape `[bs, seq, ...]`, or `sbhd` if `t` is
-            of shape `[seq, bs, ...]`. 'thd' is only supported when `fused` is True.
-        cu_seqlens: torch.Tensor, default = None.
-            Cumulative sum of sequence lengths in a batch for `t`, with shape [b + 1] and
-            dtype torch.int32. Only valid when `tensor_format` is 'thd'.
-            Should be `cu_seqlens_padded` when cp_size > 1.
-        cp_size: int, default = 1.
-            Context parallel world size. Only valid when `tensor_format` is 'thd' and `fused` is True.
-        cp_rank: int, default = 0.
-            Context parallel rank. Only valid when `tensor_format` is 'thd' and `fused` is True.
+        Apply rotary positional embedding to `t` in one of three layouts:
+          - 'sbhd': [seq, batch, heads, dim]
+          - 'bshd': [batch, seq, heads, dim]
+          - 'bhsd': [batch, heads, seq, dim]
         """
-        assert tensor_format in ("sbhd", "bshd"), (
-            "Only formats `sbhd` or `bshd` are supported for input tensor `t` "
-            f"when fused is False, got {tensor_format}."
+        assert tensor_format in ("sbhd", "bshd", "bhsd"), (
+            f"Only formats `sbhd`, `bshd` or `bhsd` are supported, got {tensor_format}."
         )
 
         max_seq_len = freqs.shape[0]
-        cur_seq_len = t.shape[1] if tensor_format == "bshd" else t.shape[0]
-
-        # Only apply the rotary embeddings up to the sequence length of the running
-        # input.
-        assert (
-            cur_seq_len <= max_seq_len
-        ), f"Rotary Embeddings only supported up to {max_seq_len} sequence length!"
-        freqs = freqs[:cur_seq_len]
+        # pick out current sequence length based on layout
         if tensor_format == "bshd":
-            freqs = freqs.transpose(0, 1)  # [seq, 1, 1, dim] -> [1, seq, 1, dim]
-        # cos/sin first then dtype conversion for better precision
+            cur_seq_len = t.shape[1]
+        elif tensor_format == "bhsd":
+            cur_seq_len = t.shape[2]
+        else:  # sbhd
+            cur_seq_len = t.shape[0]
+
+        assert cur_seq_len <= max_seq_len, (
+            f"Rotary embeddings only supported up to length {max_seq_len}, "
+            f"got {cur_seq_len}."
+        )
+        freqs = freqs[:cur_seq_len]  # [seq, 1, 1, dim]
+
+        # reshape freqs to align with t
+        if tensor_format == "bshd":
+            # from [seq,1,1,dim] -> [1,seq,1,dim]
+            freqs = freqs.transpose(0, 1)
+        elif tensor_format == "bhsd":
+            # from [seq,1,1,dim] -> [1,1,seq,dim]
+            freqs = freqs.permute(1, 2, 0, 3)
+        # if 'sbhd', leave as [seq,1,1,dim]
+
+        # compute cos/sin once
         cos_ = torch.cos(freqs).to(t.dtype)
         sin_ = torch.sin(freqs).to(t.dtype)
 
         rot_dim = freqs.shape[-1]
-        # ideally t_pass is empty so rotary pos embedding is applied to all tensor t
-        t, t_pass = t[..., :rot_dim], t[..., rot_dim:]
+        t_rot, t_pass = t[..., :rot_dim], t[..., rot_dim:]
 
-        # first part is cosine component
-        # second part is sine component, need to change signs with _rotate_half method
-        t = (t * cos_) + (_rotate_half(t) * sin_)
-        return torch.cat((t, t_pass), dim=-1)
+        # apply: (x * cos) + (rotate_half(x) * sin)
+        t_out = (t_rot * cos_) + (_rotate_half(t_rot) * sin_)
+        return torch.cat((t_out, t_pass), dim=-1)
+
 
 class VideoLearnedPositionEmb(VideoRopePosition3DEmb):
     """

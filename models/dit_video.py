@@ -97,8 +97,8 @@ class VideoDiTModel(Model):
                     patch_t = self.patch_t,
                     )
             
-        self.action_pos_embed = ActionLearnablePositionEmb(self.dim_Tp + self.dim_Tf, self.dim_head, theta=10000.0) # both future and past tokens simultaneously
-        self.video_pos_embed = VideoLearnedPositionEmb(
+        self.action_pos_embed = ActionPositionEmb(self.dim_Tp + self.dim_Tf, self.dim_head, theta=10000.0) # both future and past tokens simultaneously
+        self.video_pos_embed = VideoPositionEmb(
             head_dim=self.dim_head,
             len_h=self.dim_H // self.patch_lw,
             len_w=self.dim_W // self.patch_lw,

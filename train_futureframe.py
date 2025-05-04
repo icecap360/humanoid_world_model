@@ -67,27 +67,24 @@ def compute_val_loss(cfg, model, val_dataloader, noise_scheduler, accelerator, p
         pbar = None
 
     for step, batch in enumerate(val_dataloader):
-        latents, batch = encode_batch(cfg, batch, accelerator, vae=vae, img_vae=img_vae, vid_vae=vid_vae)
+        latents, batch = encode_batch(cfg, batch, accelerator, vae=vid_vae, img_vae=img_vae, vid_vae=vid_vae)
         bs = latents.shape[0]
         noise = torch.randn(latents.shape, device=accelerator.device)
         if cfg.use_discrete_time:
-            timesteps = torch.randint(
-                0, n_timesteps,
-                (bs,1),
-                device=accelerator.device, dtype=torch.int64
-            )
+            timesteps = torch.randint(0,  cfg.model.noise_steps, (bs,1), device=latents.device,dtype=torch.int64)
         else:
             u = torch.randn((bs,1), device=accelerator.device)
             timesteps = 1.0 / (1.0 + torch.exp(-u))
-            timesteps = timesteps # n_timesteps
+            timesteps = timesteps
         # Add noise to latents
         batch['noisy_latents'] = noise_scheduler.add_noise(latents, noise, timesteps)
 
         with torch.no_grad():
             # Predict the noise residual
             noise_pred = model(batch, timesteps, accelerator.device, use_cfg=True)
+            noise_target = noise_scheduler.get_target(latents, noise, timesteps)
             # Compute mean squared error loss (averaged over the batch)
-            loss = F.mse_loss(noise_pred, noise, reduction="mean")
+            loss = F.mse_loss(noise_pred, noise_target, reduction="mean")
         
         total_loss += loss.item() * bs
         total_samples += bs
@@ -177,6 +174,7 @@ def main(cfg):
     train_dataloader, val_dataloader = get_dataloaders(
         cfg.data.type,
         cfg,
+        vae=vid_vae,
         img_vae=img_vae.module if hasattr(img_vae, "module") else img_vae,
         vid_vae=vid_vae.module if hasattr(vid_vae, "module") else vid_vae,
         hmwm_train_dir=cfg.data.hmwm_train_dir,
@@ -275,7 +273,7 @@ def main(cfg):
             if cfg.one_sample:
                 batch = first_batch
             
-            latents, batch = encode_batch(cfg, batch, accelerator, img_vae=img_vae, vid_vae=vid_vae)
+            latents, batch = encode_batch(cfg, batch, accelerator, img_vae=img_vae, vid_vae=vid_vae, vae=vid_vae)
             noise = torch.randn(latents.shape, device=latents.device)
             bs = latents.shape[0]
             if cfg.use_discrete_time:
@@ -338,7 +336,7 @@ def main(cfg):
 
                 # Log validation loss
                 if not cfg.val.skip_val_loss:
-                    val_loss = compute_val_loss(cfg, model_unwrapped, val_dataloader, noise_scheduler,  accelerator, img_vae=img_vae, vid_vae=vid_vae)
+                    val_loss = compute_val_loss(cfg, model_unwrapped, val_dataloader, noise_scheduler,  accelerator, vae=vid_vae, img_vae=img_vae, vid_vae=vid_vae)
                     if accelerator.is_main_process:
                         if not cfg.debug:
                             wandb.log({
@@ -370,6 +368,7 @@ def main(cfg):
                                 batch=batch,
                                 dataloader=val_dataloader,
                                 batch_idx=0,
+                                vae=vid_vae,
                                 img_vae=img_vae,
                                 vid_vae=vid_vae,
                                 accelerator=accelerator,

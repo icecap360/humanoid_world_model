@@ -59,7 +59,7 @@
             "name": "train (debug)",
             "type": "debugpy",
             "request": "launch",
-            "program": "train.py",
+            "program": "train_futureframe.py",
             "console": "integratedTerminal",
             "args": ["debug=True"],
             "justMyCode": false,
