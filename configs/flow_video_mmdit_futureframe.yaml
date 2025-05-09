@@ -1,26 +1,34 @@
 train:
-  batch_size: 4 
+  batch_size: 12 
   learning_rate: 1e-4
   lr_warmup_steps: 0
-  num_epochs: 500
-  gradient_accumulation_steps: 12
+  num_epochs: 1500
+  gradient_accumulation_steps: 7
   val_iters: 1000 # 2000
   save_model_iters: 2000 # 2000
-  resume_train: false
-  resume_model: "/pub0/qasim/1xgpt/humanoid_world_model/logs/Split Atten - April-19-21-14/checkpoint-0-35999"
+  resume_train: true
+  resume_model: "/pub4/qasim/1xgpt/humanoid_world_model/logs/Flow + finalframe + 128x128 + large - May-07-23-55/checkpoint-0-39999"
 
 val:
   run: true
   batch_size: 16
   skip_val_loss: True
   skip_img_sample: False
-  output_dir: "/pub0/qasim/1xgpt/humanoid_world_model/logs"
+  output_dir: "/pub4/qasim/1xgpt/humanoid_world_model/logs"
+
+inference:
+  output_dir: "/pub4/qasim/1xgpt/humanoid_world_model/submissions/diffusion128x128"
+  checkpoint_path: "/pub4/qasim/1xgpt/humanoid_world_model/logs/Flow May-07-23-55/checkpoint-0-39999"
+  use_ema: false
+  num_inference_steps: 50
+  batch_size: 32
+  guidance_scale: 2.0 # PLAY WITH THIS
 
 image_size: 128
 debug: False
 one_sample: False
 seed: 0
-log_dir: "/pub0/qasim/1xgpt/humanoid_world_model/logs"
+log_dir: "/pub4/qasim/1xgpt/humanoid_world_model/logs"
 exp_prefix: "VideoDiT"
 dtype: 'bf16'
 mixed_precision: "bf16"  # Options: ["no", "fp16", "bf16"]
@@ -28,7 +36,7 @@ gen_type: 'future_frame'  # Options: ["future_frame", "video", "img"]
 use_discrete_time: False
 
 model:
-  type: 'video_dit'
+  type: 'video_dit_future_frame'
   unet_blocks: [256, 512, 768, 1024, 1536]
   unet_attention_resolutions: [32, 16, 8, 4]
   noise_steps:  50
@@ -38,19 +46,20 @@ model:
   ema_inv_gamma: 1.0
   ema_power: 0.75
   ema_max_decay: 0.999
-  token_dim: 1152
+  token_dim: 1280
   num_heads: 16
-  num_layers: 15
+  num_layers: 17
   patch_size: 2
 
 data:
   type: "1xgpt_future_frame"
-  hmwm_train_dir: "/pub0/qasim/1xgpt/data/data_v2_raw/train_v2.0_raw"
-  hmwm_val_dir: "/pub0/qasim/1xgpt/data/data_v2_raw/val_v2.0_raw"
-  coco_train_imgs: "/pub0/data/mscoco_2017/coco/images/train2017"
-  coco_train_ann: "/pub0/data/mscoco_2017/coco/annotations/captions_train2017.json"
-  coco_val_imgs: "/pub0/data/mscoco_2017/coco/images/val2017"
-  coco_val_ann: "/pub0/data/mscoco_2017/coco/annotations/captions_val2017.json"
+  hmwm_train_dir: "/pub4/qasim/1xgpt/data/data_v2_raw/train_v2.0_raw"
+  hmwm_val_dir: "/pub4/qasim/1xgpt/data/data_v2_raw/val_v2.0_raw"
+  hmwm_test_dir: "/pub4/qasim/1xgpt/data/data_sampling/test_v2.0"
+  coco_train_imgs: "/pub4/data/mscoco_2017/coco/images/train2017"
+  coco_train_ann: "/pub4/data/mscoco_2017/coco/annotations/captions_train2017.json"
+  coco_val_imgs: "/pub4/data/mscoco_2017/coco/images/val2017"
+  coco_val_ann: "/pub4/data/mscoco_2017/coco/annotations/captions_val2017.json"
 
 conditioning:
   type: "action"
@@ -63,7 +72,7 @@ conditioning:
   dim_act: 25
 
 image_tokenizer:
-  path: "/pub0/qasim/1xgpt/Cosmos-Tokenizer/pretrained_ckpts"
+  path: "/pub4/qasim/1xgpt/Cosmos-Tokenizer/pretrained_ckpts"
   tokenizer_type: "CV"  # Options: ["CI", "DI"]
   spatial_compression: 8 # 16
   temporal_compression: 8
