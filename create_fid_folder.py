@@ -42,7 +42,7 @@ from schedulers import get_scheduler
 #       # If use_ema=true, this should be the *path* (file or dir) containing EMA weights saved by accelerator.save_model
 #   use_ema: false # Set true to load EMA weights, false to load standard checkpoint state
 #   batch_size: 4
-#   submission_dir: "/pub0/qasim/1xgpt/humanoid_world_model/submissions/diffusion/"
+#   output_dir: "/pub0/qasim/1xgpt/humanoid_world_model/submissions/diffusion/"
 #   guidance_scale: 7.0
 #   gen_type: "video"
 #   num_frames_to_generate: 16
@@ -88,7 +88,7 @@ def main(cfg: DictConfig):
     seed = cfg.get("seed", 42)  # Keep seed accessible if needed elsewhere
 
     logging.info("--- Starting Single-Process Inference Script (using Accelerator) ---")
-    logging.info(f"Output directory: {cfg.inference.submission_dir}")
+    logging.info(f"Output directory: {cfg.inference.output_dir}")
     logging.info(f"Checkpoint path: {cfg.inference.checkpoint_path}")
     logging.info(f"Use EMA weights: {cfg.inference.use_ema}")
     logging.info(f"Inference batch size: {cfg.inference.batch_size}")
@@ -319,10 +319,10 @@ def main(cfg: DictConfig):
     logging.info("Sampler instantiated.")
 
     # --- Prepare Output Directory ---
-    submission_dir = Path(cfg.inference.submission_dir)
+    output_dir = Path(cfg.inference.output_dir)
     if accelerator.is_main_process:
-        submission_dir.mkdir(parents=True, exist_ok=True)
-        logging.info(f"Ensured output directory exists: {submission_dir}")
+        output_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(f"Ensured output directory exists: {output_dir}")
 
     # --- Inference Loop ---
     if accelerator.is_main_process:
@@ -365,7 +365,24 @@ def main(cfg: DictConfig):
                     device=accelerator.device,  # Use accelerator's device
                 )
                 # sample_videos: list (batch size) of lists (frames) of PIL Images
-
+            elif "video" in cfg.gen_type.lower():
+                logging.debug(f"Calling sample_video for batch {step}")
+                # Pass the *unwrapped* model to the sampler
+                model_unwrapped = accelerator.unwrap_model(model)
+                sample_videos, _ = sampler.sample_video(  # Ignoring sample_grids
+                    cfg=cfg,
+                    dataloader=test_dataloader,  # Pass prepared dataloader maybe? Check sampler needs
+                    batch=batch,  # Pass batch (already on device)
+                    vid_vae=vae_unwrapped,
+                    img_vae=img_vae,
+                    accelerator=accelerator,  # Pass accelerator instance if needed by sampler
+                    model=model_unwrapped,  # Pass unwrapped model
+                    guidance_scale=cfg.inference.guidance_scale,
+                    n_samples=cfg.inference.batch_size,
+                    dtype=sampling_dtype,
+                    device=accelerator.device,  # Use accelerator's device
+                )
+                # sample_videos: list (batch size) of lists (frames) of PIL Images
             else:
                 if accelerator.is_main_process:
                     logging.warning(
@@ -408,7 +425,7 @@ def main(cfg: DictConfig):
                         continue
 
                     frame_to_save = individual_video_frames  # Last frame
-                    output_filename = submission_dir / f"{sample_id}.png"
+                    output_filename = output_dir / f"{sample_id}.png"
                     try:
                         frame_to_save.save(output_filename, format="PNG")
                         logging.debug(

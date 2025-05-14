@@ -31,6 +31,7 @@ from data import (  # Assuming this can return test_loader directly
     get_dataloaders,
 )
 from models import get_model
+from samplers import denormalize_video, split_video_to_imgs
 from schedulers import get_scheduler
 
 # --- Configuration ---
@@ -79,16 +80,13 @@ def setup_accelerator(config):
     return accelerator
 
 
-@hydra.main(
-    config_path="configs", config_name="flow_video_mmdit_futureframe", version_base=None
-)
+@hydra.main(config_path="configs", config_name="flow_video_mmdit", version_base=None)
 def main(cfg: DictConfig):
     # --- Setup Accelerator and Seed ---
     accelerator = setup_accelerator(cfg)
     seed = cfg.get("seed", 42)  # Keep seed accessible if needed elsewhere
 
     logging.info("--- Starting Single-Process Inference Script (using Accelerator) ---")
-    logging.info(f"Output directory: {cfg.inference.output_dir}")
     logging.info(f"Checkpoint path: {cfg.inference.checkpoint_path}")
     logging.info(f"Use EMA weights: {cfg.inference.use_ema}")
     logging.info(f"Inference batch size: {cfg.inference.batch_size}")
@@ -108,7 +106,7 @@ def main(cfg: DictConfig):
     if cfg.image_tokenizer.get("path") and cfg.image_tokenizer.get(
         "use_img_vae", False
     ):
-        model_name_img = f"Cosmos-Tokenizer-CI{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
+        model_name_img = f"Cosmos-1.0-Tokenizer-CI{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
         img_vae = ImageTokenizer(
             checkpoint=Path(cfg.image_tokenizer.path)
             / model_name_img
@@ -174,7 +172,7 @@ def main(cfg: DictConfig):
         num_future_frames=cfg.conditioning.get("num_future_frames"),
     )
     logging.info(
-        f"Validation dataloader loaded with {len(test_dataloader.dataset)} samples."
+        f"Validation dataloader loaded with {len(val_dataloader.dataset)} samples."
     )
     # --- Load Noise Scheduler ---
     noise_scheduler = get_scheduler(cfg.model.scheduler_type, cfg.model.noise_steps)
@@ -201,10 +199,8 @@ def main(cfg: DictConfig):
     logging.info(
         "Preparing model, VAEs, conditioning manager, and dataloader with Accelerator..."
     )
-    model, vid_vae, img_vae, conditioning_manager, test_dataloader = (
-        accelerator.prepare(
-            model, vid_vae, img_vae, conditioning_manager, test_dataloader
-        )
+    model, vid_vae, img_vae, conditioning_manager, val_dataloader = accelerator.prepare(
+        model, vid_vae, img_vae, conditioning_manager, val_dataloader
     )
     # Note: From here on, use the *prepared* objects.
     logging.info("Preparation complete.")
@@ -317,10 +313,16 @@ def main(cfg: DictConfig):
     logging.info("Sampler instantiated.")
 
     # --- Prepare Output Directory ---
-    output_dir = Path(cfg.inference.output_dir)
+    output_dir = Path(cfg.inference.checkpoint_path) / "val_images"
+    pred_dir = output_dir / "pred"
+    gt_dir = output_dir / "gt"
     if accelerator.is_main_process:
         output_dir.mkdir(parents=True, exist_ok=True)
         logging.info(f"Ensured output directory exists: {output_dir}")
+        pred_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(f"Ensured output directory exists: {pred_dir}")
+        gt_dir.mkdir(parents=True, exist_ok=True)
+        logging.info(f"Ensured output directory exists: {gt_dir}")
 
     # --- Inference Loop ---
     if accelerator.is_main_process:
@@ -329,6 +331,7 @@ def main(cfg: DictConfig):
             desc="Generating Samples",
             disable=not accelerator.is_local_main_process,
         )
+    model_unwrapped = model  # .unwrap_model()
 
     for step, batch in enumerate(val_dataloader):
         # Batches from the prepared dataloader are automatically on the correct device
@@ -337,33 +340,7 @@ def main(cfg: DictConfig):
                 torch.float32
             )  # Or adjust based on model/mixed precision needs
 
-            # --- Select Sampler ---
-            if "future_frame" in cfg.gen_type.lower():
-                logging.debug(f"Calling sample_video for batch {step}")
-                # Pass the *unwrapped* model to the sampler
-                model_unwrapped = accelerator.unwrap_model(model)
-                # VAE passed during sampler init was already unwrapped
-                if len(batch["future_frames"].shape) == 4:
-                    batch["future_frames"] = batch["future_frames"].unsqueeze(
-                        2
-                    )  # Ensure dtype is correct
-                # batch['past_actions'] = batch['past_actions'].unsqueeze(0) # Ensure dtype is correct
-                # Run sampling
-                sample_videos = sampler.sample_future_frame(  # Ignoring sample_grids
-                    cfg=cfg,
-                    dataloader=test_dataloader,  # Pass prepared dataloader maybe? Check sampler needs
-                    batch=batch,  # Pass batch (already on device)
-                    vid_vae=vae_unwrapped,
-                    img_vae=img_vae,
-                    accelerator=accelerator,  # Pass accelerator instance if needed by sampler
-                    model=model_unwrapped,  # Pass unwrapped model
-                    guidance_scale=cfg.inference.guidance_scale,
-                    n_samples=cfg.inference.batch_size,
-                    dtype=sampling_dtype,
-                    device=accelerator.device,  # Use accelerator's device
-                )
-                # sample_videos: list (batch size) of lists (frames) of PIL Images
-            elif "video" in cfg.gen_type.lower():
+            if "video" in cfg.gen_type.lower():
                 sample_videos, _ = sampler.sample_video(
                     cfg,
                     batch=batch,
@@ -385,17 +362,10 @@ def main(cfg: DictConfig):
             # --- Process and Save Results ---
             # Only the main process saves the files
             if accelerator.is_main_process:
-                if "sample_id" not in batch:
-                    logging.error(
-                        f"Batch {step} does not contain 'sample_id'. Cannot save files correctly."
-                    )
-                    progress_bar.update(1)
-                    continue
-
-                batch_sample_ids = batch["sample_id"]
+                batch_sample_ids = batch["future_frames_idxs"]
                 if isinstance(batch_sample_ids, torch.Tensor):
                     # Ensure IDs are on CPU for list conversion/file naming
-                    batch_sample_ids = batch_sample_ids.cpu().tolist()
+                    batch_sample_ids = batch_sample_ids.cpu().numpy()
 
                 if len(sample_videos) != len(batch_sample_ids):
                     logging.warning(
@@ -405,6 +375,37 @@ def main(cfg: DictConfig):
                     continue
 
                 for i in range(len(batch_sample_ids)):
+                    for j in range(len(batch_sample_ids[i])):
+                        id = batch_sample_ids[i][j]
+                        filename = (
+                            str(batch_sample_ids[i][id][0])
+                            + "-"
+                            + str(batch_sample_ids[i][id][1])
+                            + ".png"
+                        )
+                        output_filename = output_dir / filename
+                        try:
+                            pred_img = sample_videos[i][j]
+                            if pred_img.size != (512, 512):
+                                pred_img = pred_img.resize(
+                                    (512, 512), Image.Resampling.BICUBIC
+                                )
+                            pred_img.save(pred_dir / filename, format="PNG")
+                            logging.debug(
+                                f"Saved image for sample {batch_sample_ids[i][j]} to {pred_dir / filename}"
+                            )
+                            gt_img = split_video_to_imgs(
+                                denormalize_video(batch["future_frames"][i][j])
+                            )
+                            gt_img.save(gt_dir / filename, format="PNG")
+                            logging.debug(
+                                f"Saved image for sample {batch_sample_ids[i][j]} to {gt_dir / filename}"
+                            )
+                        except Exception as e:
+                            logging.error(
+                                f"Failed to save image for sample {batch_sample_ids[i][j]} to {output_filename}: {e}"
+                            )
+
                     sample_id = batch_sample_ids[i]
                     individual_video_frames = sample_videos[i]
 

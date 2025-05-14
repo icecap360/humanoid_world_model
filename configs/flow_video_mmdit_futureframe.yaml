@@ -17,8 +17,8 @@ val:
   output_dir: "/pub4/qasim/1xgpt/humanoid_world_model/logs"
 
 inference:
-  output_dir: "/pub4/qasim/1xgpt/humanoid_world_model/submissions/diffusion128x128"
-  checkpoint_path: "/pub4/qasim/1xgpt/humanoid_world_model/logs/Flow May-07-23-55/checkpoint-0-39999"
+  submission_dir: "/pub4/qasim/1xgpt/humanoid_world_model/submissions/diffusion128x128"
+  checkpoint_path: "/pub4/qasim/1xgpt/humanoid_world_model/logs/Flow May-09-12-25/checkpoint-0-167999"
   use_ema: false
   num_inference_steps: 50
   batch_size: 32

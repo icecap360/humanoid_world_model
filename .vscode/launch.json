@@ -80,6 +80,18 @@
             }
         },
         {
+            "name": "create_val_results",
+            "type": "debugpy",
+            "request": "launch",
+            "program": "create_val_results.py",
+            "console": "integratedTerminal",
+            "args": ["debug=True"],
+            "justMyCode": false,
+            "env": {
+                "CUDA_VISIBLE_DEVICES": "2"
+            }
+        },
+        {
             "name": "train (distributed + debug)",
             "type": "python",
             "request": "launch",

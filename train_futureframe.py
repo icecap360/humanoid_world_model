@@ -127,9 +127,7 @@ def compute_val_loss(
     return avg_loss.item()
 
 
-@hydra.main(
-    config_path="configs", config_name="flow_video_mmdit_futureframe", version_base=None
-)
+@hydra.main(config_path="configs", config_name="flow_video_mmdit", version_base=None)
 def main(cfg):
     torch.manual_seed(0)
     np.random.seed(0)
@@ -182,7 +180,7 @@ def main(cfg):
     )
     # tokenizer_config = TokenizerConfigs['CV'].value
     # tokenizer_config.update(dict(spatial_compression=cfg.image_tokenizer.spatial_compression))
-    model_name = f"Cosmos-Tokenizer-CV{cfg.image_tokenizer.temporal_compression}x{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
+    model_name = f"Cosmos-1.0-Tokenizer-CV{cfg.image_tokenizer.temporal_compression}x{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
     vid_vae = CausalVideoTokenizer(
         checkpoint=Path(cfg.image_tokenizer.path) / model_name / "autoencoder.jit",
         checkpoint_enc=Path(cfg.image_tokenizer.path) / model_name / "encoder.jit",
@@ -288,7 +286,7 @@ def main(cfg):
         optimizer,
         train_dataloader,
         val_dataloader,
-        # lr_scheduler,
+        lr_scheduler,
     ) = accelerator.prepare(
         model,
         img_vae,
@@ -296,7 +294,7 @@ def main(cfg):
         optimizer,
         train_dataloader,
         val_dataloader,
-        # lr_scheduler,
+        lr_scheduler,
     )
     conditioning_manager.to(accelerator.device)
 

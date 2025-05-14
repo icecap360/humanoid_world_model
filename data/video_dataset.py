@@ -25,6 +25,7 @@ class RawVideoDataset(TorchDataset):
         stride=4,
         skip_frame=1,
         with_actions=True,
+        down_sample=2,
     ):
         super().__init__()
         # mp.set_start_method('spawn')
@@ -32,6 +33,7 @@ class RawVideoDataset(TorchDataset):
         self.data_dir = Path(data_dir)
         self.vae = vae
         self.cfg = cfg
+        self.down_sample = down_sample
         self.image_size = cfg.image_size
 
         # Load main metadata
@@ -101,7 +103,9 @@ class RawVideoDataset(TorchDataset):
             skip_frame,
         )
         # Number of frames between the first and last frames of a video sequence (excluding one endpoint frame)
-        self.video_len = self.n_output + self.n_input  # * self.skip_frame
+        self.video_len = (
+            self.n_output + self.n_input
+        ) * down_sample  # * self.skip_frame
 
         start_indices = np.arange(0, self.num_images - self.video_len, self.stride)
         end_indices = start_indices + self.video_len
@@ -199,13 +203,19 @@ class RawVideoDataset(TorchDataset):
         frames = np.moveaxis(frames, 3, 0)
         frames = frames / _UINT8_MAX_F * 2.0 - 1.0
 
+        frames = frames[:, :: self.down_sample]
         past_frames = frames[:, : self.n_input]
         future_frames = frames[:, self.n_input :]
+        assert past_frames.shape[1] == self.n_input
         assert future_frames.shape[1] == self.n_output
 
         ret = {
             "past_frames": past_frames.astype(np.float32),
             "future_frames": future_frames.astype(np.float32),
+            "future_frames_idxs": [
+                (start_idx, i)
+                for i in range(start_idx + self.n_input, start_idx + self.video_len)
+            ],
         }
 
         if self.with_actions:
