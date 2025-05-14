@@ -180,7 +180,7 @@ def main(cfg):
     )
     # tokenizer_config = TokenizerConfigs['CV'].value
     # tokenizer_config.update(dict(spatial_compression=cfg.image_tokenizer.spatial_compression))
-    model_name = f"Cosmos-1.0-Tokenizer-CV{cfg.image_tokenizer.temporal_compression}x{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
+    model_name = f"Cosmos-0.1-Tokenizer-CV{cfg.image_tokenizer.temporal_compression}x{cfg.image_tokenizer.spatial_compression}x{cfg.image_tokenizer.spatial_compression}"
     vid_vae = CausalVideoTokenizer(
         checkpoint=Path(cfg.image_tokenizer.path) / model_name / "autoencoder.jit",
         checkpoint_enc=Path(cfg.image_tokenizer.path) / model_name / "encoder.jit",

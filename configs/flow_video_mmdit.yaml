@@ -1,9 +1,9 @@
 train:
-  batch_size: 12
+  batch_size: 16
   learning_rate: 1e-4
-  lr_warmup_steps: 50
-  num_epochs: 500
-  gradient_accumulation_steps: 10
+  lr_warmup_steps: 0
+  num_epochs: 3
+  gradient_accumulation_steps: 4
   val_iters: 1000 # 2000
   save_model_iters: 5000 # 2000
   resume_train: false
@@ -25,7 +25,7 @@ inference:
   batch_size: 32
   guidance_scale: 2.0 # PLAY WITH THIS
 
-image_size: 128
+image_size: 256
 debug: False
 one_sample: False
 seed: 1
@@ -74,6 +74,6 @@ conditioning:
 image_tokenizer:
   path: "/pub4/qasim/1xgpt/Cosmos-Tokenizer/pretrained_ckpts"
   tokenizer_type: "CV"  # Options: ["CI", "DI"]
-  spatial_compression: 8 # 16
+  spatial_compression: 16 # 16
   temporal_compression: 8
   dtype: "bfloat16"
